@@ -35,5 +35,10 @@ parser.add_argument('--com-len', default=100, type=int, help='customized com len
 parser.add_argument('--pro-len', default=1000, type=int, help='customized pro len')
 parser.add_argument('--model-mode', default='train_wo_valid', type=str)
 
+# MoE Specific Arguments
+parser.add_argument('--mode', default='full', choices=['debug', 'full'], help='debug mode uses subset size to rapidly test models.')
+parser.add_argument('--subset-size', default=100, type=int, help='number of samples to test in debug mode')
+parser.add_argument('--lambda-aux', default=0.1, type=float, help='weight for auxiliary load balancing loss in MoE')
+
 args = parser.parse_args()
 print('ARGUMENT:\n', args) 

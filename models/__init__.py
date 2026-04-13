@@ -12,8 +12,10 @@ from .dpdta import DeepDTA
 from .mdprd import MDeePred
 from .cpi import CPIPrediction
 from .dp import DeepPurpose
-# from .perceivercpi import PerceiverCPI
+from .perceivercpi import PerceiverCPI
+from .gifdti import GraphTransformer # Assuming gitdti has an entry module. I will create a factory.
 # from .smtdta import SMTDTA
+from .model_MoE import DTI_Sparse_MoE
 
 from .embedding import emb_dcdti, emb_dp, emb_dpdta, return_embedding
 
@@ -25,11 +27,11 @@ def build_model(name, task, data=None):
     elif name == 'mdprd':
         return MDeePred(1024, 1, task)
     elif name == 'cpi':
-        return CPIPrediction(data.fp_num, data.word_num, 10, task)
+        return CPIPrediction(data.fp_num if data else 100, data.word_num if data else 100, 10, task)
     elif name == 'dp':
         return DeepPurpose([256+256, 1024, 1024, 512, 1], [26,32,64,96], [4,8,12], task)
     elif name == 'perceivercpi':
-        pass
+        return PerceiverCPI(output_dim=1, task=task)
     elif name == 'smtdta':
         pass
 
