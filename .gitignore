@@ -1,0 +1,10 @@
+.venv/
+venv39/
+dataset/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.DS_Store
+.vscode/

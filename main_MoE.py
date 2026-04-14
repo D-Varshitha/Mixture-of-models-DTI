@@ -30,7 +30,8 @@ def main():
     # 1. Initialize Dataset
     print(f"Loading Dataset: {data_name}...")
     # NOTE: In debug mode we do NOT build monolithic precomputed features if they don't exist
-    dataset = MoEDataset(root=os.getcwd(), dataset_name=data_name, mode='load' if args.mode == 'full' else 'debug')
+    label_col = 'lab' if args.task == 'classification' else 'affinity'
+    dataset = MoEDataset(root=os.getcwd(), dataset_name=data_name, label_type=label_col, mode='load' if args.mode == 'full' else 'debug')
     
     # 2. Handle Debug Mode vs Full Mode
     if args.mode == 'debug':
@@ -39,13 +40,14 @@ def main():
         dataset = torch.utils.data.Subset(dataset, subset_indices)
         all_idx = list(range(len(dataset)))
         
-        # Override epoch for debug
+        # Override epoch & batch for debug to prevent silent CPU Out-Of-Memory crash
         args.epoch = min(args.epoch, 2)
+        args.batch = min(args.batch, 4)
     else:
         all_idx = list(range(len(dataset)))
         
     if args.task == 'classification':
-        loss_fn = nn.BCELoss()
+        loss_fn = nn.BCEWithLogitsLoss()
         args.metrics = metrics_classification
     else:
         loss_fn = nn.MSELoss()
@@ -70,7 +72,7 @@ def main():
         'dcdti': build_model('dcdti', args.task),
         'dp': build_model('dp', args.task),
         'mdprd': build_model('mdprd', args.task),
-        'cpi': build_model('cpi', args.task, dummy_data),
+        'gifdti': build_model('gifdti', args.task),
         'perceivercpi': build_model('perceivercpi', args.task)
     }
     
@@ -82,7 +84,7 @@ def main():
     # 4. K-Fold Execution Pipeline
     print(f"Execution Pipeline starting. Mode={args.mode}")
     # Always do fold 0 for debug, 5-folds for full mode if exp_mode is 5_fold_val
-    folds_to_run = 5 if args.mode == 'full' and args.exp_mode == '5_fold_val' else 1
+    folds_to_run = 5 if args.mode == 'full' and args.exp_mode == '5_fold_val' else 2
     
     for fold in range(folds_to_run):
         print(f"\n===== FOLD {fold} =====")

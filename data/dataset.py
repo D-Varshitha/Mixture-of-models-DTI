@@ -18,7 +18,7 @@ import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from ogb.utils.features import atom_to_feature_vector, bond_to_feature_vector
-from utils import *
+from .utils import *
 
 import torch
 from torch_geometric.data import Data, InMemoryDataset
@@ -236,9 +236,11 @@ class CPIDataset(InMemoryDataset):
     def generate_fp(self, fp_type):
         fp_len = int(fp_type.split('_')[1])
         fps = []
+        from rdkit.Chem import rdFingerprintGenerator
+        generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=fp_len)
         for com, smi in self.lig_dic.items():
             mol = Chem.MolFromSmiles(smi)
-            fp = np.array(AllChem.GetMorganFingerprintAsBitVect(mol, useChirality=True, radius=2, nBits=fp_len), dtype=float)
+            fp = np.array(generator.GetFingerprint(mol), dtype=float)
             fps.append(fp)
         fps = np.stack(fps)
         np.save(f'{self.com_feat_dir}/fps_{fp_len}.npy', fps)

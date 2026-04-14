@@ -1,7 +1,9 @@
 
 import torch
 import torch.nn as nn
-from drug_target_interaction.end.models.GlobalMaxPooling1D import GlobalMaxPooling1D
+class GlobalMaxPooling1D(nn.Module):
+    def forward(self, x):
+        return torch.max(x, dim=1).values
 
 class DeepConvDTI(nn.Module):
   ''' 
@@ -13,7 +15,7 @@ class DeepConvDTI(nn.Module):
     super().__init__()
     self.pro_layer_init = nn.Sequential(
       nn.Embedding(2500, 20),
-      nn.Dropout2d(0.2),
+      nn.Dropout1d(0.2),
     )
     self.pro_layer_cnn = nn.ModuleList(
       [

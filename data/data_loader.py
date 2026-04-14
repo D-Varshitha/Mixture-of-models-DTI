@@ -2,7 +2,7 @@
 
 import os
 import torch
-from datasets import CustomCPIDataset  # 假设你已实现
+from .dataset import CustomCPIDataset  # 假设你已实现
 
 def generate_dataset_by_model(data_name: str, model_name: str, args) -> torch.utils.data.Dataset:
     dataset_path = os.path.join(os.getcwd(), 'dataset', data_name, model_name, 'dataset.pt')

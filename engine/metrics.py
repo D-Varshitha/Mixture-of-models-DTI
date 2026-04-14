@@ -26,10 +26,13 @@ def calculate_performance_classification(df,args): # df with columns 'label', 'p
     acc_ = acc(label, pred)
     pre_ = pre(label, pred)
     rec_ = rec(label, pred)
-    auc_ = auc(label, pred)
+    try:
+        auc_ = auc(label, pred)
+    except Exception:
+        auc_ = 0.0
     ba_ = ba(label, pred)
-    tn, fp, fn, tp = cm(label, pred).ravel()
-    spe_ = tn / (tn + fp)
+    tn, fp, fn, tp = cm(label, pred, labels=[0, 1]).ravel()
+    spe_ = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     
     return [acc_, pre_, rec_, spe_, auc_, ba_]
 

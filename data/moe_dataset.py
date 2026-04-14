@@ -4,6 +4,25 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from .dataset import CPIDataset, CHARPROTSET
 
+# ──────────────────────────────────────────────────────────────────────────────
+# NOTE ON EXPERT INPUT FORMATS
+# ──────────────────────────────────────────────────────────────────────────────
+# dpdta  (DeepDTA):      com = integer SMILES token IDs  [L_d]   (has internal nn.Embedding)
+#                        pro = integer amino-acid IDs    [L_p]   (has internal nn.Embedding)
+# dcdti  (DeepConvDTI):  com = 2048-dim Morgan FP        [2048]  (Linear layer, NO embedding)
+#                        pro = integer amino-acid IDs    [L_p]   (has internal nn.Embedding)
+# mdprd  (MDeePred):     com = 1024-dim Morgan FP        [1024]  (Linear layer, NO embedding)
+#                        pro = 5-channel 500x500 matrix  [5,500,500]
+# dp     (DeepPurpose):  com = MPNN graph features (5 tensors)
+#                        pro = one-hot protein matrix    [26+1, L_p]  (pre-built in __getitem__)
+# gifdti (CNNFormerDTI): com = shared_drug (integer SMILES token IDs)  [L_d]
+#                        pro = shared_prot (integer amino-acid IDs)    [L_p]
+#                        (also uses padding masks: gifdti_com_mask, gifdti_pro_mask)
+# perceivercpi:          com = shared_drug (integer SMILES token IDs)  [L_d]
+#                        pro = shared_prot (integer amino-acid IDs)    [L_p]
+#                        (also uses padding masks: shared_drug_mask, shared_prot_mask)
+# ──────────────────────────────────────────────────────────────────────────────
+
 class MoEDataset(CPIDataset):
     def __init__(self, root, dataset_name, MAX_SMI_LEN=100, MAX_SEQ_LEN=1000, label_type='label', mode='load'):
         super(MoEDataset, self).__init__(root, dataset_name, label_type, mode)
@@ -20,18 +39,30 @@ class MoEDataset(CPIDataset):
             self.smi_enc = self.get_smi_enc(MAX_SMI_LEN)
             self.seq_enc = self.get_seq_enc(MAX_SEQ_LEN)
             
-            # DeepPurpose
+            # DeepPurpose (MPNN graph features)
             self.mpnn = self.get_mpnn_feature
             self.dp_pro = self.get_dp
             
-            # MDeePred
+            # MDeePred (1024-dim and 5-channel protein map)
             self.mdprd = self.get_mdprd
             
             # CPI/Graph
             self.subgraph_feat, self.subgraph_adj = self.get_subgraph
             self.cpi_word = self.get_word
+
+            # DeepConvDTI: 2048-dim Morgan fingerprint for compound
+            self.fp_2048 = self.get_fp(2048)  # np.array [num_lig, 2048]
+
+            # MDeePred: 1024-dim Morgan fingerprint for compound
+            self.fp_1024 = self.get_fp(1024)  # np.array [num_lig, 1024]
+
         except Exception as e:
             print(f"Warning: Some precomputed features not found. Proceeding with caution. {e}")
+            # Provide empty fallbacks so __getitem__ can handle missing data gracefully
+            if not hasattr(self, 'fp_2048'):
+                self.fp_2048 = None
+            if not hasattr(self, 'fp_1024'):
+                self.fp_1024 = None
 
     def __len__(self):
         return self.num_interaction
@@ -43,7 +74,14 @@ class MoEDataset(CPIDataset):
         label = torch.tensor(self.label[ind], dtype=torch.float32)
         
         # --- Shared Gating Features ---
-        smi_enc_val = self.smi_enc[cid]
+        if hasattr(self, 'smi_enc'):
+            smi_enc_val = self.smi_enc[cid]
+        else:
+            from data.dataset import CHARCANSMISET
+            from data.utils import build_seq_enc
+            # Use appropriate vocab dict (using CHARCANSMISET)
+            smi_enc_val = build_seq_enc(self.lig_dic[self.lig[ind]], CHARCANSMISET)
+
         if len(smi_enc_val) < self.MAX_SMI_LEN:
             padded_smi = smi_enc_val + [0] * (self.MAX_SMI_LEN - len(smi_enc_val))
             smi_mask = [False]*len(smi_enc_val) + [True]*(self.MAX_SMI_LEN - len(smi_enc_val))
@@ -51,7 +89,13 @@ class MoEDataset(CPIDataset):
             padded_smi = smi_enc_val[:self.MAX_SMI_LEN]
             smi_mask = [False]*self.MAX_SMI_LEN
             
-        seq_enc_val = self.seq_enc[pid]
+        if hasattr(self, 'seq_enc'):
+            seq_enc_val = self.seq_enc[pid]
+        else:
+            from data.dataset import CHARPROTSET
+            from data.utils import build_seq_enc
+            seq_enc_val = build_seq_enc(self.pro_dic[self.pro[ind]], CHARPROTSET)
+
         if len(seq_enc_val) < self.MAX_SEQ_LEN:
             padded_seq = seq_enc_val + [0] * (self.MAX_SEQ_LEN - len(seq_enc_val))
             seq_mask = [False]*len(seq_enc_val) + [True]*(self.MAX_SEQ_LEN - len(seq_enc_val))
@@ -73,8 +117,86 @@ class MoEDataset(CPIDataset):
             'shared_prot_mask': torch.tensor(seq_mask, dtype=torch.bool),
         }
         
+        # --- DeepDTA (dpdta) & GIFDTI & PerceiverCPI (Shared Tokens) ---
+        batch_dict['dpdta_com'] = batch_dict['shared_drug']
+        batch_dict['dpdta_pro'] = batch_dict['shared_prot']
+        
+        batch_dict['gifdti_com'] = batch_dict['shared_drug']
+        batch_dict['gifdti_pro'] = batch_dict['shared_prot']
+        batch_dict['gifdti_com_mask'] = batch_dict['shared_drug_mask']
+        batch_dict['gifdti_pro_mask'] = batch_dict['shared_prot_mask']
+
+        # --- DeepConvDTI (dcdti) ---
+        if hasattr(self, 'fp_2048') and self.fp_2048 is not None:
+             batch_dict['dcdti_com'] = torch.tensor(self.fp_2048[cid], dtype=torch.float32)
+        else:
+             batch_dict['dcdti_com'] = torch.zeros(2048, dtype=torch.float32)
+        batch_dict['dcdti_pro'] = batch_dict['shared_prot']
+
+        # --- MDeePred (mdprd) ---
+        if hasattr(self, 'fp_1024') and self.fp_1024 is not None:
+             batch_dict['mdprd_com'] = torch.tensor(self.fp_1024[cid], dtype=torch.float32)
+        else:
+             batch_dict['mdprd_com'] = torch.zeros(1024, dtype=torch.float32)
+             
         try:
-            # --- DeepPurpose (dp) ---
+             batch_dict['mdprd_pro'] = self.mdprd[pid].to(torch.float32)
+        except Exception:
+             batch_dict['mdprd_pro'] = torch.zeros((5, 500, 500), dtype=torch.float32)
+             
+        # --- PerceiverCPI (pcpi) ---
+        batch_dict['pcpi_smiles'] = batch_dict['shared_drug']
+        batch_dict['pcpi_sequence'] = batch_dict['shared_prot']
+        
+        if hasattr(self, 'fp_1024') and self.fp_1024 is not None:
+             batch_dict['pcpi_morgan'] = torch.tensor(self.fp_1024[cid], dtype=torch.float32)
+        else:
+             try:
+                 from rdkit.Chem import rdFingerprintGenerator
+                 from rdkit import Chem
+                 mol = Chem.MolFromSmiles(self.lig_dic[self.lig[ind]])
+                 generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024)
+                 fp = np.array(generator.GetFingerprint(mol), dtype=np.float32)
+                 batch_dict['pcpi_morgan'] = torch.tensor(fp)
+             except:
+                 batch_dict['pcpi_morgan'] = torch.zeros(1024, dtype=torch.float32)
+        
+        max_atoms = self.MAX_SMI_LEN
+        pad_atoms = np.zeros((max_atoms, 5), dtype=np.float32)
+        pad_bonds = np.zeros((max_atoms, max_atoms, 3), dtype=np.float32)
+        pad_adj = np.zeros((max_atoms, max_atoms), dtype=np.float32)
+        try:
+             from rdkit import Chem
+             mol = Chem.MolFromSmiles(self.lig_dic[self.lig[ind]])
+             if mol is not None:
+                 n_atoms = mol.GetNumAtoms()
+                 n_a = min(n_atoms, max_atoms)
+                 
+                 atoms = []
+                 for atom in mol.GetAtoms():
+                     atoms.append([atom.GetAtomicNum(), atom.GetDegree(), atom.GetFormalCharge(), atom.GetNumExplicitHs(), int(atom.GetIsAromatic())])
+                 pad_atoms[:n_a] = np.array(atoms, dtype=np.float32)[:n_a]
+                 
+                 adj = np.array(Chem.GetAdjacencyMatrix(mol), dtype=np.float32)
+                 pad_adj[:n_a, :n_a] = adj[:n_a, :n_a]
+                 
+                 for bond in mol.GetBonds():
+                     i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+                     if i < n_a and j < n_a:
+                         b_feat = [bond.GetBondTypeAsDouble(), int(bond.IsInRing()), int(bond.GetIsConjugated())]
+                         pad_bonds[i, j] = pad_bonds[j, i] = b_feat
+        except:
+             pass
+            
+        batch_dict['pcpi_graph'] = [
+             torch.tensor(pad_atoms, dtype=torch.float32),
+             torch.tensor(pad_bonds, dtype=torch.float32),
+             torch.tensor(pad_adj, dtype=torch.float32)
+        ]
+
+             
+        # --- DeepPurpose (dp) ---
+        try:
             mpnn_val = self.mpnn[cid]
             batch_dict['dp_af'] = torch.tensor(mpnn_val[0], dtype=torch.float32)
             batch_dict['dp_bf'] = torch.tensor(mpnn_val[1], dtype=torch.float32)
@@ -88,25 +210,15 @@ class MoEDataset(CPIDataset):
             else:
                 dp_p_feat = dp_p_feat[:self.MAX_SEQ_LEN]
             batch_dict['dp_pro'] = torch.tensor(np.eye(len(CHARPROTSET)+1)[dp_p_feat].T, dtype=torch.float32)
-            
-            # --- DeepConv-DTI (dcdti) & DeepDTA (dpdta) ---
-            batch_dict['dcdti_com'] = batch_dict['shared_drug'] # DTA uses same 1D encoding
-            batch_dict['dcdti_pro'] = batch_dict['shared_prot']
-            batch_dict['dpdta_com'] = batch_dict['shared_drug']
-            batch_dict['dpdta_pro'] = batch_dict['shared_prot']
-            
-            # --- MDeePred (mdprd) ---
-            batch_dict['mdprd_com'] = batch_dict['shared_drug']
-            batch_dict['mdprd_pro'] = self.mdprd[pid].to(torch.float32)
-            
-            # --- CPI ---
-            batch_dict['cpi_com'] = torch.LongTensor(self.subgraph_feat[cid])
-            batch_dict['cpi_adj'] = torch.FloatTensor(self.subgraph_adj[cid])
-            batch_dict['cpi_pro'] = torch.LongTensor(self.cpi_word[pid])
-            
         except Exception:
-            # In case features are missing during debug runs
-            pass
+            # Provide zero-dummies to prevent crashing in debug
+            batch_dict['dp_af'] = torch.zeros((1, 39), dtype=torch.float32)
+            batch_dict['dp_bf'] = torch.zeros((1, 50), dtype=torch.float32)
+            batch_dict['dp_ag'] = torch.zeros((1, 1), dtype=torch.float32)
+            batch_dict['dp_bg'] = torch.zeros((1, 1), dtype=torch.float32)
+            # Must be 1 to preserve at least 1 atom/bond item in scope, avoiding 0-dimension mismatch
+            batch_dict['dp_abn'] = torch.ones((1, 2), dtype=torch.float32)
+            batch_dict['dp_pro'] = torch.zeros((26+1, self.MAX_SEQ_LEN), dtype=torch.float32)
 
         return batch_dict
 

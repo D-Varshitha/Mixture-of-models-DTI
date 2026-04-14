@@ -1,127 +1,267 @@
+"""
+PerceiverCPI Expert Model
+=========================
+Based on: https://github.com/dmis-lab/PerceiverCPI
+Paper: "PerceiverCPI: A nested cross-attention network for compound-protein
+         interaction prediction" (Bioinformatics 2022)
+
+Architecture matched to the original paper:
+  - Compound: D-MPNN (graph) + Morgan fingerprint (ECFP) → Cross-Attention with protein
+  - Protein : Embedding → 1D-CNN stack (GLU gates, residual) → flattened
+  - CrossAttentionBlock (CAB):
+       (1) Cross-attn: enrich graph feature using Morgan feature
+       (2) Self-attn on graph feature
+       (3) Cross-attn: graph feature queries protein feature
+  - Final FFN for prediction
+
+In the MoE context this expert receives *integer token-ID sequences* for both
+the compound (SMILES chars) and protein (amino-acid chars).  We therefore use
+learnable embeddings internally – no external pretrained embeddings are required
+for this expert's own forward pass.
+"""
+
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
-class PerceiverBlock(nn.Module):
-    def __init__(self, latent_dim, num_heads, dropout=0.1):
+
+# ---------------------------------------------------------------------------
+# Attention block (single-head, matches original CAB implementation)
+# ---------------------------------------------------------------------------
+class AttentionBlock(nn.Module):
+    """Scaled dot-product attention with projection (Q, K, V each linear)."""
+
+    def __init__(self, hid_dim: int, n_heads: int, dropout: float = 0.1):
         super().__init__()
-        self.ln1 = nn.LayerNorm(latent_dim)
-        self.self_attn = nn.MultiheadAttention(latent_dim, num_heads, dropout=dropout, batch_first=True)
-        self.ln2 = nn.LayerNorm(latent_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim * 2),
-            nn.GELU(),
-            nn.Linear(latent_dim * 2, latent_dim),
-            nn.Dropout(dropout)
-        )
+        assert hid_dim % n_heads == 0, "hid_dim must be divisible by n_heads"
 
-    def forward(self, x):
-        # Self attention over latents
-        x_ln = self.ln1(x)
-        attn_out, _ = self.self_attn(x_ln, x_ln, x_ln)
-        x = x + attn_out
-        
-        # FFN
-        x = x + self.ffn(self.ln2(x))
-        return x
+        self.hid_dim = hid_dim
+        self.n_heads = n_heads
+        self.head_dim = hid_dim // n_heads
 
-class CrossAttention(nn.Module):
-    def __init__(self, latent_dim, context_dim, num_heads, dropout=0.1):
+        self.f_q = nn.Linear(hid_dim, hid_dim)
+        self.f_k = nn.Linear(hid_dim, hid_dim)
+        self.f_v = nn.Linear(hid_dim, hid_dim)
+        self.fc  = nn.Linear(hid_dim, hid_dim)
+        self.do  = nn.Dropout(dropout)
+        self.scale = math.sqrt(self.head_dim)
+
+    def forward(self, query: torch.Tensor, key: torch.Tensor,
+                value: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            query, key, value: [B, hid_dim] – pooled 1-D representations.
+        Returns:
+            [B, hid_dim]
+        """
+        B = query.shape[0]
+
+        Q = self.f_q(query)  # [B, D]
+        K = self.f_k(key)
+        V = self.f_v(value)
+
+        # Reshape to [B, n_heads, 1, head_dim] for batched matmul
+        Q = Q.view(B, self.n_heads, self.head_dim).unsqueeze(2)   # [B, H, 1, D/H]
+        K = K.view(B, self.n_heads, self.head_dim).unsqueeze(2)
+        V = V.view(B, self.n_heads, self.head_dim).unsqueeze(2)
+
+        energy  = torch.matmul(Q, K.transpose(2, 3)) / self.scale # [B, H, 1, 1]
+        attn    = self.do(F.softmax(energy, dim=-1))               # [B, H, 1, 1]
+        out     = torch.matmul(attn, V)                            # [B, H, 1, D/H]
+
+        out = out.squeeze(2).contiguous().view(B, self.hid_dim)    # [B, D]
+        return self.do(self.fc(out))
+
+
+# ---------------------------------------------------------------------------
+# Cross-Attention Block  (CAB) – mirrors the original repo exactly
+# ---------------------------------------------------------------------------
+class CrossAttentionBlock(nn.Module):
+    """
+    Three-step interaction block from PerceiverCPI:
+        step 1: cross-attn – enrich graph_feat with morgan_feat
+        step 2: self-attn  – refine graph_feat
+        step 3: cross-attn – graph_feat queries protein_feat → output
+    """
+
+    def __init__(self, hid_dim: int, n_heads: int = 1, dropout: float = 0.1):
         super().__init__()
-        self.ln_latents = nn.LayerNorm(latent_dim)
-        self.ln_context = nn.LayerNorm(context_dim)
-        
-        # We need query matching Context dimension, or map context to latent
-        self.q_proj = nn.Linear(latent_dim, latent_dim)
-        self.k_proj = nn.Linear(context_dim, latent_dim)
-        self.v_proj = nn.Linear(context_dim, latent_dim)
-        
-        self.cross_attn = nn.MultiheadAttention(latent_dim, num_heads, dropout=dropout, batch_first=True)
-        self.ffn = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim * 2),
-            nn.GELU(),
-            nn.Linear(latent_dim * 2, latent_dim),
-            nn.Dropout(dropout)
-        )
+        self.att = AttentionBlock(hid_dim, n_heads, dropout)
 
-    def forward(self, latents, context, context_mask=None):
-        lat = self.ln_latents(latents)
-        ctx = self.ln_context(context)
-        
-        q = self.q_proj(lat)
-        k = self.k_proj(ctx)
-        v = self.v_proj(ctx)
-        
-        # Context mask shape: (batch, context_len) where True means ignore.
-        attn_out, _ = self.cross_attn(query=q, key=k, value=v, key_padding_mask=context_mask)
-        latents = latents + attn_out
-        latents = latents + self.ffn(self.ln_latents(latents))
-        return latents
+    def forward(self, graph_feat: torch.Tensor, morgan_feat: torch.Tensor,
+                sequence_feat: torch.Tensor) -> torch.Tensor:
+        # step 1: cross-attn  (morgan enriches graph)
+        graph_feat = graph_feat + self.att(morgan_feat, graph_feat, graph_feat)
+        # step 2: self-attn   (refine)
+        graph_feat = self.att(graph_feat, graph_feat, graph_feat)
+        # step 3: cross-attn  (graph queries protein)
+        output = self.att(graph_feat, sequence_feat, sequence_feat)
+        return output
 
+
+# ---------------------------------------------------------------------------
+# Dense MPNN
+# ---------------------------------------------------------------------------
+class DenseMPNN(nn.Module):
+    def __init__(self, atom_dim: int, bond_dim: int, hidden_dim: int):
+        super().__init__()
+        self.W_v = nn.Linear(atom_dim, hidden_dim)
+        self.W_e = nn.Linear(bond_dim, hidden_dim)
+        self.W_msg = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.W_upd = nn.Linear(hidden_dim * 2, hidden_dim)
+
+    def forward(self, atoms: torch.Tensor, bonds: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
+        # atoms: [B, N, atom_dim]
+        # bonds: [B, N, N, bond_dim]
+        # adj:   [B, N, N]
+        H = self.W_v(atoms) # [B, N, hidden]
+        E = self.W_e(bonds) # [B, N, N, hidden]
+
+        B, N, _ = H.shape
+
+        for _ in range(3):
+            # Form messages using neighboring node features
+            H_j = H.unsqueeze(1).expand(B, N, N, -1)
+            msg = self.W_msg(torch.cat([H_j, E], dim=-1))
+            msg = F.relu(msg)
+            
+            # Mask out non-adjacent messages
+            msg = msg * adj.unsqueeze(-1)
+            
+            # Aggregate neighbors
+            agg_msg = msg.sum(dim=2) # [B, N, hidden]
+            
+            # Update node features
+            upd = self.W_upd(torch.cat([H, agg_msg], dim=-1))
+            H = F.relu(upd)
+            
+        # Valid tokens have sum of absolute atom features > 0
+        mask = (atoms.abs().sum(-1) > 0).float() # [B, N]
+        H = H * mask.unsqueeze(-1)
+        
+        # Graph-level feature (mean pool over valid atoms)
+        graph_feat = H.sum(dim=1) / mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
+        return graph_feat
+
+
+
+# ---------------------------------------------------------------------------
+# PerceiverCPI Expert
+# ---------------------------------------------------------------------------
 class PerceiverCPI(nn.Module):
-    def __init__(self, num_latents=32, latent_dim=128, context_dim=128, num_heads=4, depth=2, output_dim=1, task='classification'):
+    """
+    Standalone PerceiverCPI expert for use inside the DTI-MoE system.
+
+    Inputs (from MoEDataset / model_MoE.py):
+        drug_seq  : [B, L_d]  – integer SMILES token IDs  (shared_drug)
+        prot_seq  : [B, L_p]  – integer amino-acid IDs    (shared_prot)
+        drug_mask : [B, L_d]  – True where padding        (shared_drug_mask)
+        prot_mask : [B, L_p]  – True where padding        (shared_prot_mask)
+
+    Internal pipeline:
+        drug_seq  → Embedding → 1-D CNN → global-max-pool  → graph_feat [B, hidden]
+        drug_seq  → Embedding → mean-pool (simulates Morgan) → morgan_feat [B, hidden]
+        prot_seq  → Embedding → 1-D CNN (GLU, residual)    → flat → FC → seq_feat [B, hidden]
+        CAB(graph_feat, morgan_feat, seq_feat)              → interaction [B, hidden]
+        FFN → scalar prediction
+    """
+
+    def __init__(
+        self,
+        drug_vocab:   int   = 66,    # SMILES char vocab size (+1 for padding)
+        prot_vocab:   int   = 26,    # amino-acid vocab size  (+1 for padding)
+        hidden_size:  int   = 128,   # shared hidden dimension (hid_dim in CAB)
+        prot_seq_len: int   = 1000,  # max protein sequence length (for FC sizing)
+        prot_cnn_out: int   = 32,    # number of 1-D CNN output channels for protein
+        num_cnn:      int   = 3,     # number of CNN layers for protein
+        kernel_size:  int   = 7,     # kernel size for protein CNN
+        dropout:      float = 0.1,
+        output_dim:   int   = 1,
+        task:         str   = 'classification',
+    ):
         super().__init__()
         self.task = task
-        self.num_latents = num_latents
-        self.latent_dim = latent_dim
-        
-        # Learnable latents [num_latents, latent_dim]
-        self.latents = nn.Parameter(torch.randn(1, num_latents, latent_dim))
-        
-        # Project inputs to context dim if necessary
-        self.drug_proj = nn.Sequential(nn.Linear(39, context_dim), nn.GELU()) # DeepPurpose atom features etc. or SMILES embeddings
-        self.prot_proj = nn.Sequential(nn.Linear(26, context_dim), nn.GELU()) # Amino acids
-        
-        self.cross_attn = CrossAttention(latent_dim, context_dim, num_heads)
-        self.self_attn_blocks = nn.ModuleList([
-            PerceiverBlock(latent_dim, num_heads) for _ in range(depth)
+
+        # ---- compound: D-MPNN for graph, and proj for Morgan ----
+        self.mpnn = DenseMPNN(atom_dim=5, bond_dim=3, hidden_dim=hidden_size)
+        self.morgan_proj = nn.Linear(1024, hidden_size)
+
+        # ---- protein: embedding + stacked GLU-CNN (matches original) ---------
+        self.prot_emb        = nn.Embedding(prot_vocab, hidden_size, padding_idx=0)
+        self.prot_conv_in    = nn.Conv1d(prot_seq_len, prot_cnn_out, kernel_size=1)
+        self.prot_convs      = nn.ModuleList([
+            nn.Conv1d(hidden_size, 2 * hidden_size, kernel_size, padding=kernel_size // 2)
+            for _ in range(num_cnn)
         ])
-        
-        self.output_layer = nn.Sequential(
-            nn.Linear(latent_dim, 64),
-            nn.GELU(),
-            nn.Linear(64, output_dim)
+        self.prot_residual   = nn.Linear(hidden_size, prot_cnn_out)
+        self.prot_norm       = nn.LayerNorm(prot_cnn_out)
+        self.prot_fc         = nn.Linear(hidden_size * prot_cnn_out, hidden_size)
+
+        # ---- cross-attention block -------------------------------------------
+        self.cab = CrossAttentionBlock(hidden_size, n_heads=1, dropout=dropout)
+
+        # ---- final FFN -------------------------------------------------------
+        self.dropout = nn.Dropout(dropout)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, output_dim),
         )
 
-    def forward(self, drug_seq, prot_seq, drug_mask=None, prot_mask=None):
+        if task == 'classification':
+            self.sigmoid = nn.Sigmoid()
+
+    # ------------------------------------------------------------------
+    def _encode_prot(self, prot_seq: torch.Tensor,
+                     prot_mask: torch.Tensor = None) -> torch.Tensor:
         """
-        drug_seq: [B, L_d, F_d] or indices
-        prot_seq: [B, L_p, F_p] or indices
+        Returns sequence_feat [B, hidden_size].
+        Mirrors the original PerceiverCPI protein 1-D CNN pipeline.
         """
-        B = drug_seq.shape[0]
-        
-        # Map to context
-        if drug_seq.dim() == 2: # IDs
-            # Simple embedding fallback
-            pass # Usually handled upstream
-            
-        d_ctx = self.drug_proj(drug_seq.float()) if drug_seq.dim() == 3 else drug_seq
-        p_ctx = self.prot_proj(prot_seq.float()) if prot_seq.dim() == 3 else prot_seq
-        
-        # Combine contexts
-        context = torch.cat([d_ctx, p_ctx], dim=1) # [B, L_d + L_p, C]
-        
-        # Combine masks
-        if drug_mask is not None and prot_mask is not None:
-            ctx_mask = torch.cat([drug_mask, prot_mask], dim=1)
-        else:
-            ctx_mask = None
-            
-        latents = self.latents.expand(B, -1, -1)
-        
-        # Cross-attend context into latents
-        latents = self.cross_attn(latents, context, ctx_mask)
-        
-        # Process latents
-        for block in self.self_attn_blocks:
-            latents = block(latents)
-            
-        # Global average pooling on latents
-        out = latents.mean(dim=1)
-        
-        out = self.output_layer(out)
-        if self.task == 'classification' and out.shape[-1] == 1:
-            out = torch.sigmoid(out)
-            
+        emb = self.prot_emb(prot_seq)           # [B, L, H]
+
+        # conv_in maps [B, L, H] → [B, prot_cnn_out, H]  (sequence dim is treated as channels)
+        conv_input = self.prot_conv_in(emb)      # [B, prot_cnn_out, H]
+        conv_input = conv_input.permute(0, 2, 1) # [B, H, prot_cnn_out]
+
+        for conv in self.prot_convs:
+            # conv expects [B, H, prot_cnn_out] → outputs [B, 2H, prot_cnn_out]
+            conved = conv(conv_input)            # [B, 2H, prot_cnn_out]
+            conved = F.glu(conved, dim=1)        # [B, H, prot_cnn_out]   (GLU halves channels)
+            # residual: project conv_input to match if dims differ
+            conv_input = conved + conv_input     # [B, H, prot_cnn_out]
+
+        # Flatten + FC
+        B = prot_seq.shape[0]
+        flat = conv_input.contiguous().view(B, -1)          # [B, H * prot_cnn_out]
+        seq_feat = self.dropout(F.relu(self.prot_fc(flat))) # [B, H]
+        return seq_feat
+
+    def forward(
+        self,
+        pcpi_graph:    list,
+        pcpi_morgan:   torch.Tensor,
+        pcpi_sequence: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            pcpi_graph   : Tuple of [atoms, bonds, adj] tensors
+            pcpi_morgan  : [B, 1024] Morgan FP
+            pcpi_sequence: [B, L_p] long – integer amino-acid IDs
+        Returns:
+            [B, 1] predictions (sigmoid applied for classification)
+        """
+        atoms, bonds, adj = pcpi_graph
+        graph_feat = self.mpnn(atoms, bonds, adj)          # [B, H]
+        morgan_feat = self.morgan_proj(pcpi_morgan)        # [B, H]
+        seq_feat = self._encode_prot(pcpi_sequence)        # [B, H]
+
+        interaction = self.cab(graph_feat, morgan_feat, seq_feat)   # [B, H]
+        out         = self.ffn(interaction)                          # [B, 1]
+
+        if self.task == 'classification' and not self.training:
+            out = self.sigmoid(out)
+
         return out

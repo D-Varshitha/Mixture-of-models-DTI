@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-from .model import DeepConvDTI, DeepDTA, MDeePred, CPIPrediction, DeepPurpose
+
 
 def emb_dp(self, com, pro):
   com = self.mpnn(com)

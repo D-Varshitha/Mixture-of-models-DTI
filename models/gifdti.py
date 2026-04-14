@@ -307,8 +307,9 @@ class CNNformerEncoder(nn.Module):
         return CNNformeroutputs
 
 class CNNFormerDTI(nn.Module):
-    def __init__(self, drug_dict, protein_dict):
+    def __init__(self, drug_dict, protein_dict, task='classification'):
         super(CNNFormerDTI, self).__init__()
+        self.task = task
         self.protein_embed = nn.Embedding(protein_dict['embeding_num'], drug_dict['embeding_dim'], padding_idx=0)
         self.drug_embed = nn.Embedding(drug_dict['embeding_num'], protein_dict['embeding_dim'], padding_idx=0)
         self.protein_F = CNNformerEncoder(
@@ -341,7 +342,7 @@ class CNNFormerDTI(nn.Module):
         self.fc2 = nn.Linear(1024, 1024)
         self.dropout3 = nn.Dropout(0.1)
         self.fc3 = nn.Linear(1024, 512)
-        self.out = nn.Linear(512, 2)
+        self.out = nn.Linear(512, 1)
 
     def forward(self, drug, protein, drug_mask, protein_mask):
         drug_embed = self.drug_embed(drug)
@@ -403,6 +404,8 @@ class CNNFormerDTI(nn.Module):
         fully2 = self.dropout3(fully2)
         fully3 = F.leaky_relu(self.fc3(fully2),0.01)
         predict = self.out(fully3)
+        if self.task == 'classification':
+             predict = torch.sigmoid(predict)
         return predict
 
 

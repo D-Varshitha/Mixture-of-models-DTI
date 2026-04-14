@@ -3,8 +3,8 @@
 import torch
 import random
 from typing import Dict, List, Union, Tuple
-from data_loader import generate_dataset_by_model
-from data_split import split_dataset, split_dataset_by_fold
+from .data_loader import generate_dataset_by_model
+from .data_split import split_dataset, split_dataset_by_fold
 
 def load_data(data_name: str, model_names: List[str], args) -> Dict[str, torch.utils.data.Dataset]:
     datasets = {}

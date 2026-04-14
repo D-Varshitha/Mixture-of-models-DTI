@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from typing import List, Tuple
-from drug_target_interaction.end.models.utils import get_kernel_size
+
 
 
 

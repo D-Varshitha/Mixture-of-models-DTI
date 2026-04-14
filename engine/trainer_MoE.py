@@ -17,7 +17,7 @@ def train_moe(train_loader, model, loss_fn, optimizer, args, valid_loader=None):
         for batch in train_loader:
             optimizer.zero_grad()
             output, aux_loss = model(batch)
-            labels = batch['label'].to(output.device)
+            labels = batch['label'].to(output.device).float()
             
             main_loss = loss_fn(output, labels)
             total_loss = main_loss + aux_loss
@@ -61,7 +61,7 @@ def test_moe(loader, model, loss_fn, args, split='Test', epoch=0):
     with torch.no_grad():
         for batch in loader:
             output, aux_loss = model(batch)
-            batch_labels = batch['label'].to(output.device)
+            batch_labels = batch['label'].to(output.device).float()
             main_loss = loss_fn(output, batch_labels)
             
             loss = main_loss + aux_loss
@@ -69,7 +69,11 @@ def test_moe(loader, model, loss_fn, args, split='Test', epoch=0):
             total_main_loss += main_loss.item()
             total_aux_loss += aux_loss.item()
 
-            preds.extend(output.cpu().numpy().tolist())
+            if args.task == 'classification':
+                preds.extend(torch.sigmoid(output).cpu().numpy().tolist())
+            else:
+                preds.extend(output.cpu().numpy().tolist())
+            
             labels.extend(batch_labels.cpu().numpy().tolist())
             com_ids.extend(batch['com_id'])
             pro_ids.extend(batch['pro_id'])
