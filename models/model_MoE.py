@@ -8,7 +8,7 @@ Architecture (matches specification):
   3.  Top-k (k=2) sparse routing.
   4.  Each selected expert runs independently on its own input format.
   5.  Expert scalar predictions are collected into a [B, num_experts] matrix.
-  6.  A trainable MLP aggregates expert outputs into the final scalar.
+  6.  Weighted sum aggregates expert outputs into the final scalar.
   7.  Auxiliary load-balancing loss (Switch-Transformer style) prevents collapse.
 
 Key fixes over previous version
@@ -20,7 +20,7 @@ Key fixes over previous version
   keeping the distinction between "token-level" and "pooled" clearly separated.
 * PerceiverCPI is dispatched correctly: integer token IDs are passed directly
   (no extra unsqueeze).
-* Final aggregation uses a trainable MLP (FinalAggMLP), not a simple weighted sum.
+* Final aggregation uses a simple weighted sum of selected experts.
 * The MLP's weights update during training via standard back-prop.
 """
 
@@ -267,28 +267,6 @@ class SharedGatingNetwork(nn.Module):
 # ---------------------------------------------------------------------------
 # Final Aggregation MLP
 # ---------------------------------------------------------------------------
-class FinalAggMLP(nn.Module):
-    """
-    Aggregates scalar predictions from all experts into a single output.
-
-    Input  : [B, num_experts]  – weighted expert scalars (0 for non-selected)
-    Output : [B, 1]
-
-    This fully-connected MLP is trained end-to-end; its weights are updated
-    through back-propagation just like every other module.
-    """
-
-    def __init__(self, num_experts: int, hidden: int = 64):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(num_experts, hidden),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)  # [B, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +281,7 @@ class DTI_Sparse_MoE(nn.Module):
       2. Top-k (k=2) experts are selected per sample.
       3. Selected experts run independently on their own encoded inputs.
       4. Expert scalar outputs * routing weights → [B, num_experts] matrix.
-      5. FinalAggMLP maps [B, num_experts] → [B] prediction.
+      5. Weighted sum maps [B, num_experts] → [B] prediction.
       6. Auxiliary load-balancing loss (Switch-Transformer CV² style) is added.
 
     Args:
@@ -334,8 +312,6 @@ class DTI_Sparse_MoE(nn.Module):
             drug_vocab, prot_vocab, num_experts=self.num_experts
         )
 
-        # Trainable final aggregation MLP  (weights updated during training)
-        self.agg_mlp = FinalAggMLP(num_experts=self.num_experts, hidden=64)
 
     # ------------------------------------------------------------------
     def forward(self, batch: dict):
@@ -468,9 +444,9 @@ class DTI_Sparse_MoE(nn.Module):
             # appears exactly once per expert slot (any() deduplicates).
             expert_preds[selected_indices, exp_idx] = out * exp_weights
 
-        # ---- 3. Final MLP aggregation (trainable) ---------------------
+        # ---- 3. Final Weighted Sum Aggregation ------------------------
         # expert_preds : [B, num_experts]  zeros for non-selected experts
-        final_output = self.agg_mlp(expert_preds).squeeze(-1)  # [B]
+        final_output = expert_preds.sum(dim=1)  # [B]
 
         # ---- 4. Auxiliary load-balancing loss -------------------------
         mean_gate_probs = gate_probs.mean(dim=0)               # [E]
