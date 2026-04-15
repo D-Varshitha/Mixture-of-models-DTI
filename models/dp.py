@@ -33,9 +33,11 @@ class DeepPurpose(nn.Module):
     na, nb = 0,0
     # print(f'fa shape: {fa.shape}, fb shpae:{fb.shape}, ga shape: {ga.shape}, gb shape:{gb.shape}, n shape:{n.shape}')
     for i in range(n.shape[0]):
-      # print(n[i], n[i][0])
       an = int(n[i][0][0].item())  # atom num
       bn = int(n[i][0][1].item())  # bond num
+      # FIX 3: Guard against empty graphs from invalid SMILES (prevents torch.cat([]) crash)
+      an = max(an, 1)
+      bn = max(bn, 1)
 
       fal.append(fa[i,:an,:])
       fbl.append(fb[i,:bn,:])
@@ -94,10 +96,8 @@ class DeepPurpose(nn.Module):
     x = torch.cat((com, pro), 1)
     for i, l in enumerate(self.predictor):
       if i == (len(self.predictor)-1):
-        if self.task == 'classification':
-          x = torch.sigmoid(l(x))
-        else:
-          x = l(x)
+        # FIX 1: Output raw logits; BCEWithLogitsLoss handles sigmoid externally.
+        x = l(x)
       else:
         x = F.relu(self.dropout(l(x)))
     return x

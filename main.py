@@ -1,7 +1,10 @@
 import torch
 import os
 import sys
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 from torch import nn
 from tqdm import trange
 
@@ -51,15 +54,14 @@ def main():
 
     # Training or testing logic
     for m in models:
-        model = declare_model(m, args.task, data_obj if m in ['dpdta', 'cpi'] else None).to(device)
         if args.task == 'classification':
-            loss_fn = nn.BCELoss()
+            # FIX 1 (repo-wide): prefer logits + BCEWithLogitsLoss to avoid double-sigmoid.
+            # Expert models are now expected to return raw logits.
+            loss_fn = nn.BCEWithLogitsLoss()
             args.metrics = metrics_classification
         else:
             loss_fn = nn.MSELoss()
             args.metrics = metrics_regression
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
         if args.exp_mode == 'pure_test':
             test_loader = return_dataloader(data_obj[m], args.batch, shuffle=False)
@@ -69,15 +71,22 @@ def main():
             if args.exp_mode == '5_fold_val':
                 datasets, all_idx = data_obj
                 for fold in range(5):
+                    # FIX 5: Re-initialize model + optimizer inside fold loop.
+                    model = declare_model(m, args.task, data_obj if m in ['dpdta', 'cpi'] else None).to(device)
+                    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
                     train_loader, valid_loader, test_loader = split_dataset_by_fold(datasets[m], all_idx, fold, args.batch)
-                    wandb.init(project='ensdti', name=f'{m}_fold{fold}', config=args, reinit=True)
+                    if wandb is not None:
+                        wandb.init(project='ensdti', name=f'{m}_fold{fold}', config=args, reinit=True)
                     train(train_loader, model, loss_fn, optimizer, args, valid_loader=valid_loader)
                     result, perf = test('Test', test_loader, model, loss_fn, args)
             elif args.exp_mode in ['pure_train', 'train_and_test']:
+                model = declare_model(m, args.task, data_obj if m in ['dpdta', 'cpi'] else None).to(device)
+                optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
                 train_datasets, valid_datasets = data_obj[:2]
                 train_loader = return_dataloader(train_datasets[m], args.batch, shuffle=True)
                 valid_loader = return_dataloader(valid_datasets[m], args.batch, shuffle=False)
-                wandb.init(project='ensdti', name=f'{m}_train', config=args, reinit=True)
+                if wandb is not None:
+                    wandb.init(project='ensdti', name=f'{m}_train', config=args, reinit=True)
                 train(train_loader, model, loss_fn, optimizer, args, valid_loader=valid_loader)
                 if args.exp_mode == 'train_and_test':
                     test_loader = return_dataloader(data_obj[2][m], args.batch, shuffle=False)

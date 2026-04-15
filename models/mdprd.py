@@ -89,6 +89,5 @@ class MDeePred(nn.Module):    # com: fp_1024, pro: mdprd
     # print(com.shape, pro.shape)
     x = torch.cat((com, pro), 1)
     x = self.int_layer(x)
-    if self.task == 'classification':
-      x = torch.sigmoid(x)
+    # FIX 1: Output raw logits; BCEWithLogitsLoss handles sigmoid externally.
     return x

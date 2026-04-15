@@ -1,4 +1,7 @@
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 import os
 import torch
 import pandas as pd
@@ -20,7 +23,8 @@ def train(train_loader, model, loss_fn, optimizer, args, valid_loader=None):
             optimizer.step()
             epoch_loss += loss.item()
 
-        wandb.log({f'Train Loss': epoch_loss}, step=epoch)
+        if wandb is not None and wandb.run is not None:
+            wandb.log({f'Train Loss': epoch_loss}, step=epoch)
 
         if args.lr_decay and args.decay_interval and epoch % args.decay_interval == 0:
             optimizer.param_groups[0]['lr'] *= args.lr_decay
@@ -58,8 +62,9 @@ def test(loader, model, loss_fn, args, split='Test', epoch=0):
     })
 
     metrics = calculate_performance(result_df, args)
-    wandb.log({f'{split} Loss': total_loss}, step=epoch)
-    wandb.log({f'{split} {args.metrics[i]}': metrics[i] for i in range(len(metrics))}, step=epoch)
+    if wandb is not None and wandb.run is not None:
+        wandb.log({f'{split} Loss': total_loss}, step=epoch)
+        wandb.log({f'{split} {args.metrics[i]}': metrics[i] for i in range(len(metrics))}, step=epoch)
 
     return result_df, pd.DataFrame([metrics], columns=args.metrics)
 

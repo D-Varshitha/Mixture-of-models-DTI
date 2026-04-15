@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import os
 
 
 # ---------------------------------------------------------------------------
@@ -36,17 +37,28 @@ import math
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
+        self.d_model = d_model
+        self.register_buffer('pe', self._build_pe(max_len))
+
+    def _build_pe(self, max_len: int) -> torch.Tensor:
+        pe = torch.zeros(max_len, self.d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+            torch.arange(0, self.d_model, 2).float() * (-math.log(10000.0) / self.d_model)
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        return pe
+
+    def ensure_length(self, target_len: int, device: torch.device):
+        if target_len <= self.pe.size(0):
+            return
+        new_pe = self._build_pe(target_len).to(device=device)
+        self.pe = new_pe
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, L, D]
+        self.ensure_length(x.size(1), x.device)
         return x + self.pe[:x.size(1), :]
 
 
@@ -80,7 +92,7 @@ class SharedGatingEncoder(nn.Module):
     ):
         super().__init__()
         self.embedding   = nn.Embedding(vocab_size, d_model, padding_idx=0)
-        self.pretrained_proj = nn.Linear(pretrained_dim, d_model)
+        self.pretrained_proj = nn.LazyLinear(d_model)
         
         self.pos_encoder = PositionalEncoding(d_model, max_len=max_len)
         encoder_layer    = nn.TransformerEncoderLayer(
@@ -110,47 +122,54 @@ class SharedGatingEncoder(nn.Module):
         """
         if self.is_chunked and x.size(1) > self.chunk_size:
             # ---- Chunked path ------------------------------------------------
-            B, L = x.shape
+            B, L = x.shape[:2]
             num_chunks  = math.ceil(L / self.chunk_size)
-            chunk_reps  = []
+            chunk_outputs  = []
 
             for i in range(num_chunks):
                 start      = i * self.chunk_size
                 end        = min(start + self.chunk_size, L)
                 x_chunk    = x[:, start:end]                       # [B, cs] or [B, cs, D]
                 mask_chunk = mask[:, start:end] if mask is not None else None
+                original_mask_chunk = mask_chunk
 
                 emb = self._get_embeddings(x_chunk)
-                emb = self.pos_encoder(emb)
+                self.pos_encoder.ensure_length(end, emb.device)
+                # FIX 8: Use absolute position offset so tokens in chunk i
+                # get positions [start, start+chunk_len), not [0, chunk_len).
+                # This preserves global positional context across chunk boundaries.
+                chunk_len = emb.size(1)
+                emb = emb + self.pos_encoder.pe[start:start + chunk_len, :].unsqueeze(0)
                 
                 # Prevent PyTorch TransformerEncoder crash if a row is entirely padded
                 if mask_chunk is not None:
+                    mask_chunk = mask_chunk.clone()
                     all_pad_rows = mask_chunk.all(dim=1)
                     if all_pad_rows.any():
-                        # Clone to avoid modifying the original dataset mask
-                        mask_chunk = mask_chunk.clone()
                         mask_chunk[all_pad_rows, 0] = False
                         
                 out = self.transformer(emb, src_key_padding_mask=mask_chunk)
+                if original_mask_chunk is not None:
+                    out = out.masked_fill(original_mask_chunk.unsqueeze(-1), 0.0)
 
-                # Per-chunk valid-token mean  → [B, D]  (one rep per chunk)
-                if mask_chunk is not None:
-                    valid      = (~mask_chunk).float().unsqueeze(-1)  # [B, cs, 1]
-                    chunk_rep  = (out * valid).sum(1) / valid.sum(1).clamp(min=1)
-                else:
-                    chunk_rep  = out.mean(dim=1)
+                chunk_outputs.append(out)
 
-                chunk_reps.append(chunk_rep)
-
-            # Stack → [B, num_chunks, D]  (preserves sequence-of-chunks structure)
-            return torch.stack(chunk_reps, dim=1)
+            return torch.cat(chunk_outputs, dim=1)
 
         else:
             # ---- Standard path  – full token-level output ---------------------
             emb = self._get_embeddings(x)
             emb = self.pos_encoder(emb)
             # Returns token-level hidden states: [B, L, D]
+            original_mask = mask
+            if mask is not None:
+                mask = mask.clone()
+                all_pad_rows = mask.all(dim=1)
+                if all_pad_rows.any():
+                    mask[all_pad_rows, 0] = False
             out = self.transformer(emb, src_key_padding_mask=mask)
+            if original_mask is not None:
+                out = out.masked_fill(original_mask.unsqueeze(-1), 0.0)
             return out  # [B, L, D]  ← NO POOLING HERE
 
 
@@ -213,7 +232,7 @@ class SharedGatingNetwork(nn.Module):
 
         self.gate_mlp = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
-            nn.BatchNorm1d(d_model),
+            nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(d_model, num_experts),
@@ -233,11 +252,11 @@ class SharedGatingNetwork(nn.Module):
         """
         # 1. Encode to token-level (no pooling inside encoders)
         drug_token_embs = self.drug_enc(drug_tokens, drug_mask)  # [B, L_d, D]
-        prot_chunk_embs = self.prot_enc(prot_tokens, prot_mask)  # [B, num_chunks, D]
+        prot_chunk_embs = self.prot_enc(prot_tokens, prot_mask)  # [B, L_p, D]
 
         # 2. Pool to fixed-size vectors for the MLP using Attention Pooling
         d_rep = self.drug_pool(drug_token_embs, drug_mask)           # [B, D]
-        p_rep = self.prot_pool(prot_chunk_embs, None)                # [B, D]  (chunk-level)
+        p_rep = self.prot_pool(prot_chunk_embs, prot_mask)           # [B, D]
 
         # 3. Concatenate and compute logits
         rep    = torch.cat([d_rep, p_rep], dim=-1)               # [B, 2D]
@@ -331,7 +350,8 @@ class DTI_Sparse_MoE(nn.Module):
             aux_loss     : scalar    – weighted load-balancing loss
         """
         B      = batch['label'].shape[0]
-        device = batch['label'].device
+        device = next(self.parameters()).device
+
 
         drug_tokens = batch['shared_drug'].to(device)        # [B, L_d]
         prot_tokens = batch['shared_prot'].to(device)        # [B, L_p]
@@ -350,6 +370,12 @@ class DTI_Sparse_MoE(nn.Module):
         # Normalize selected weights to sum to 1
         w = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-6)     # [B, k]
 
+        # FIX 6: Enabled expert routing prints (controlled by MOE_DEBUG_ROUTING env var)
+        if os.environ.get("MOE_DEBUG_ROUTING", "0") == "1":
+            for i in range(B):
+                selected = [self.expert_keys[idx] for idx in top_k_indices[i].tolist()]
+                print(f"Sample {i} -> {selected}")
+
         # ---- 2. Expert dispatch ---------------------------------------
         # Collect weighted scalar per expert slot: [B, num_experts]
         expert_preds = torch.zeros(B, self.num_experts, device=device)
@@ -367,80 +393,76 @@ class DTI_Sparse_MoE(nn.Module):
                 continue  # Expert not used in this batch
 
             expert = self.experts[expert_name]
-            
-            # Temporarily bypass BatchNorm crashes triggered by MoE 1-sample subrouting
-            was_training = expert.training
-            if len(selected_indices) == 1 and was_training:
-                expert.eval()
 
-            # ---- Expert-specific input extraction ----------------------
+            run_indices = selected_indices
+
             if expert_name == 'dp':
-                af  = batch['dp_af'][selected_indices].to(device)
-                bf  = batch['dp_bf'][selected_indices].to(device)
-                ag  = batch['dp_ag'][selected_indices].to(device)
-                bg  = batch['dp_bg'][selected_indices].to(device)
-                abn = batch['dp_abn'][selected_indices].to(device)
-                pro = batch['dp_pro'][selected_indices].to(device)
+                # DeepPurpose features are already padded by robust moe_collate_fn
+                af  = batch['dp_af'][run_indices].to(device)
+                bf  = batch['dp_bf'][run_indices].to(device)
+                ag  = batch['dp_ag'][run_indices].to(device)
+                bg  = batch['dp_bg'][run_indices].to(device)
+                abn = batch['dp_abn'][run_indices].to(device)
+                pro = batch['dp_pro'][run_indices].to(device)
                 out = expert([af, bf, ag, bg, abn], pro).reshape(-1)
 
-            elif expert_name == 'cpi':
-                # Routed to PerceiverCPI: use integer token-ID sequences
-                com      = batch['shared_drug'][selected_indices].to(device)  # [S, L_d]
-                pro      = batch['shared_prot'][selected_indices].to(device)   # [S, L_p]
-                com_mask = (batch['shared_drug_mask'][selected_indices].to(device)
-                            if 'shared_drug_mask' in batch else None)
-                pro_mask = (batch['shared_prot_mask'][selected_indices].to(device)
-                            if 'shared_prot_mask' in batch else None)
-                out = expert(com, pro, com_mask, pro_mask).reshape(-1)
+            # NOTE: 'cpi' branch removed — expert is registered as 'perceivercpi'.
+            # Shared embeddings must NEVER be passed to experts (pipeline spec).
 
             elif expert_name == 'dcdti':
-                # DeepConvDTI: com expects 2048-dim fingerprint, pro expects int token IDs
-                com = batch['dcdti_com'][selected_indices].to(device)   # [S, 2048]
-                pro = batch['dcdti_pro'][selected_indices].to(device)   # [S, L_p] int
+                com = batch['dcdti_com'][run_indices].to(device)
+                pro = batch['dcdti_pro'][run_indices].long().to(device)
+                
+                # Safety checks for embedding indices (DCDTI vocab is 2500)
+                assert pro.max() < 2500, f"DCDTI protein index {pro.max()} exceeds vocab size 2500"
+                assert pro.min() >= 0, "DCDTI protein index below 0"
+                
                 out = expert(com, pro).reshape(-1)
 
             elif expert_name == 'dpdta':
-                # DeepDTA: both are integer token-ID sequences
-                com = batch['dpdta_com'][selected_indices].to(device)   # [S, L_d] int
-                pro = batch['dpdta_pro'][selected_indices].to(device)   # [S, L_p] int
+                com = batch['dpdta_com'][run_indices].to(device)
+                pro = batch['dpdta_pro'][run_indices].to(device)
                 out = expert(com, pro).reshape(-1)
 
             elif expert_name == 'mdprd':
-                # MDeePred: com is 1024-dim fingerprint, pro is 5-channel feature map
-                com = batch['mdprd_com'][selected_indices].to(device)   # [S, 1024]
-                pro = batch['mdprd_pro'][selected_indices].to(device)   # [S, 5, 500, 500]
+                com = batch['mdprd_com'][run_indices].to(device)
+                pro = batch['mdprd_pro'][run_indices].to(device)
                 out = expert(com, pro).reshape(-1)
 
             elif expert_name == 'gifdti':
-                com = batch['gifdti_com'][selected_indices].to(device)
-                pro = batch['gifdti_pro'][selected_indices].to(device)
-                com_mask = batch['gifdti_com_mask'][selected_indices].to(device) if 'gifdti_com_mask' in batch else None
-                pro_mask = batch['gifdti_pro_mask'][selected_indices].to(device) if 'gifdti_pro_mask' in batch else None
+                com      = batch['gifdti_com'][run_indices].to(device)
+                pro      = batch['gifdti_pro'][run_indices].to(device)
+                com_mask = (batch['gifdti_com_mask'][run_indices].to(device)
+                            if 'gifdti_com_mask' in batch else None)
+                pro_mask = (batch['gifdti_pro_mask'][run_indices].to(device)
+                            if 'gifdti_pro_mask' in batch else None)
                 out = expert(com, pro, com_mask, pro_mask).reshape(-1)
 
             elif expert_name == 'perceivercpi':
-                # PerceiverCPI: D-MPNN graph + ECFP fingerprint + integer amino acids
-                pcpi_graph_atoms = batch['pcpi_graph'][0][selected_indices].to(device)
-                pcpi_graph_bonds = batch['pcpi_graph'][1][selected_indices].to(device)
-                pcpi_graph_adj = batch['pcpi_graph'][2][selected_indices].to(device)
-                pcpi_graph = [pcpi_graph_atoms, pcpi_graph_bonds, pcpi_graph_adj]
-
-                pcpi_morgan = batch['pcpi_morgan'][selected_indices].to(device)
-                pcpi_sequence = batch['pcpi_sequence'][selected_indices].to(device)
+                # pcpi_graph is a list of [atoms, bonds, adj] from collate_fn
+                selected_graphs = [batch['pcpi_graph'][i] for i in run_indices.tolist()]
                 
-                out = expert(pcpi_graph, pcpi_morgan, pcpi_sequence).reshape(-1)
+                # Pad PCPI graph components
+                pcpi_atoms, pcpi_bonds, pcpi_adj = self._pad_pcpi_batch(selected_graphs, device)
+                
+                pcpi_morgan   = batch['pcpi_morgan'][run_indices].to(device)
+                pcpi_sequence = batch['pcpi_sequence'][run_indices].to(device)
+                out = expert([pcpi_atoms, pcpi_bonds, pcpi_adj],
+                             pcpi_morgan, pcpi_sequence).reshape(-1)
 
             else:
-                out = torch.zeros(len(selected_indices), device=device)
-
-            if len(selected_indices) == 1 and was_training:
-                expert.train()
+                raise RuntimeError(f"Unsupported expert '{expert_name}' in MoE dispatch.")
 
             # ---- Accumulate weighted prediction into expert slot -------
             # For each selected sample find the routing weight for this expert
             # top_k_indices[selected_indices] : [S, k]
             weight_mask = (top_k_indices[selected_indices] == exp_idx)  # [S, k]
             exp_weights = w[selected_indices][weight_mask]               # [S_matched]
+            if exp_weights.numel() != out.numel():
+                raise RuntimeError(
+                    f"Routing weight mismatch for expert '{expert_name}': "
+                    f"{exp_weights.numel()} weights vs {out.numel()} outputs"
+                )
 
             # exp_weights aligns with `out` because each sample in selected_indices
             # appears exactly once per expert slot (any() deduplicates).
@@ -451,10 +473,28 @@ class DTI_Sparse_MoE(nn.Module):
         final_output = self.agg_mlp(expert_preds).squeeze(-1)  # [B]
 
         # ---- 4. Auxiliary load-balancing loss -------------------------
-        # Switch-Transformer style: num_experts * sum(f_i * P_i)
-        # routing_fractions is not differentiable (computed from discrete top-k)
-        # mean_gate_probs IS differentiable – gradients flow through gate
         mean_gate_probs = gate_probs.mean(dim=0)               # [E]
+        routing_assignments = F.one_hot(top_k_indices, num_classes=self.num_experts).float()
+        routing_fractions = routing_assignments.sum(dim=(0, 1)) / (B * self.k)
         aux_loss = self.num_experts * torch.sum(routing_fractions * mean_gate_probs)
-
         return final_output, aux_loss * self.lambda_aux
+
+    def _pad_pcpi_batch(self, graphs, device):
+        """Helper to pad a batch of pcpi_graph (atoms, bonds, adj)."""
+        B = len(graphs)
+        max_n = max(g[0].shape[0] for g in graphs)
+        
+        # atoms: [B, N, 5]
+        atoms = torch.zeros(B, max_n, graphs[0][0].shape[1], device=device)
+        # bonds: [B, N, N, 3]
+        bonds = torch.zeros(B, max_n, max_n, graphs[0][1].shape[2], device=device)
+        # adj: [B, N, N]
+        adj = torch.zeros(B, max_n, max_n, device=device)
+        
+        for i, (a, b, ad) in enumerate(graphs):
+            n = a.shape[0]
+            atoms[i, :n, :] = a
+            bonds[i, :n, :n, :] = b
+            adj[i, :n, :n] = ad
+            
+        return atoms, bonds, adj

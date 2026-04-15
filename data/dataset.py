@@ -38,6 +38,15 @@ CHARCANSMISET = { "#": 1, "%": 2, ")": 3, "(": 4, "+": 5, "-": 6,
 			 "l": 55, "o": 56, "n": 57, "s": 58, "r": 59, "u": 60,
 			 "t": 61, "y": 62, "@": 63, "/": 64, "\\": 65}
 
+CHARISOSMISET = {"#": 29, "%": 30, ")": 31, "(": 1, "+": 32, "-": 33, "/": 34, ".": 2,
+                 "1": 35, "0": 3, "3": 36, "2": 4, "5": 37, "4": 5, "7": 38, "6": 6,
+                 "9": 39, "8": 7, "=": 40, "A": 41, "@": 8, "C": 42, "B": 9, "E": 43,
+                 "D": 10, "G": 44, "F": 11, "I": 45, "H": 12, "K": 46, "M": 47, "L": 13,
+                 "O": 48, "N": 14, "P": 15, "S": 49, "R": 16, "U": 50, "T": 17, "W": 51,
+                 "V": 18, "Y": 52, "[": 53, "Z": 19, "]": 54, "\\": 20, "a": 55, "c": 56,
+                 "b": 21, "e": 57, "d": 22, "g": 58, "f": 23, "i": 59, "h": 24, "m": 60,
+                 "l": 25, "o": 61, "n": 26, "s": 62, "r": 27, "u": 63, "t": 28, "y": 64}
+
 CHARPROTSET = { "A": 1, "C": 2, "B": 3, "E": 4, "D": 5, "G": 6, 
 				"F": 7, "I": 8, "H": 9, "K": 10, "M": 11, "L": 12, 
 				"O": 13, "N": 14, "Q": 15, "P": 16, "S": 17, "R": 18, 
@@ -45,10 +54,8 @@ CHARPROTSET = { "A": 1, "C": 2, "B": 3, "E": 4, "D": 5, "G": 6,
 				"V": 22, "Y": 23, "X": 24, 
 				"Z": 25 }
 
-ELEM_LIST = ['C', 'N', 'O', 'S', 'F', 'Si', 'P', 'Cl', 'Br', 'Mg', 'Na', 'Ca', 'Fe', 'Al', 'I', 'B', 'K', 'Se', 'Zn', 'H', 'Cu', 'Mn', 'unknown']
 
-ATOM_FDIM = len(ELEM_LIST) + 6 + 5 + 4 + 1
-BOND_FDIM = 5 + 6
+
 
 PRO_3GRAM_DICT = {}
 AMINO = ''.join(CHARPROTSET.keys())
@@ -61,7 +68,7 @@ for idx, item in enumerate(product('-'+AMINO, AMINO, AMINO+'=')):
 # when call the data, call 
 class CPIDataset(InMemoryDataset):
     # def __init__(self, root, dataset, MAX_SMI_LEN, MAX_SEQ_LEN, label_type, mode):
-    def __init__(self, root, dataset, label_type, mode):
+    def __init__(self, root, dataset, label_type, mode, subset_size=None):
         super(InMemoryDataset, self).__init__()
         self.root = root
         self.dataset = dataset
@@ -77,7 +84,12 @@ class CPIDataset(InMemoryDataset):
 
         # process the csv file
         datapath = os.path.join(self.root, 'dataset', self.dataset, 'data.csv')
-        self.ori_csv = df = pd.read_csv(datapath)
+        df = pd.read_csv(datapath)
+        if subset_size is not None:
+            # Consistent sampling for debug mode
+            df = df.sample(n=min(subset_size, len(df)), random_state=42).reset_index(drop=True)
+        self.ori_csv = df
+
         self.lig = self.ori_csv['lig']
         self.pro = self.ori_csv['pro']
         self.smi = self.ori_csv['smi']
@@ -162,54 +174,53 @@ class CPIDataset(InMemoryDataset):
     def generate_mpnn_feature(self, MAX_SMI_LEN):
         mpnn = []
         for com, smi in self.lig_dic.items():
-            try: 
-                padding = torch.zeros(ATOM_FDIM + BOND_FDIM)
-                fatoms, fbonds = [], [padding] 
-                in_bonds,all_bonds = [], [(-1,-1)] 
-                mol = Chem.MolFromSmiles(smi)
-                Chem.Kekulize(mol)
-                n_atoms = mol.GetNumAtoms()
-                for atom in mol.GetAtoms():
-                    fatoms.append(atom_features(atom))
-                    in_bonds.append([])
+            # FIX 2 (strict dataset usage): NO fallback to dummy/zero tensors.
+            # If any molecule fails to featurize, crash so the dataset can be fixed.
+            padding = torch.zeros(ATOM_FDIM + BOND_FDIM)
+            fatoms, fbonds = [], [padding]
+            in_bonds, all_bonds = [], [(-1, -1)]
+            mol = Chem.MolFromSmiles(smi)
+            if mol is None:
+                raise RuntimeError(f"[Dataset] Invalid SMILES for MPNN featurization: com_id={com} smiles={smi!r}")
+            Chem.Kekulize(mol, clearAromaticFlags=True)
+            n_atoms = mol.GetNumAtoms()
+            if n_atoms <= 0:
+                raise RuntimeError(f"[Dataset] Empty molecule after parsing: com_id={com} smiles={smi!r}")
 
-                for bond in mol.GetBonds():
-                    a1 = bond.GetBeginAtom()
-                    a2 = bond.GetEndAtom()
-                    x = a1.GetIdx() 
-                    y = a2.GetIdx()
+            for atom in mol.GetAtoms():
+                fatoms.append(atom_features(atom))
+                in_bonds.append([])
 
-                    b = len(all_bonds)
-                    all_bonds.append((x,y))
-                    fbonds.append( torch.cat([fatoms[x], bond_features(bond)], 0) )
-                    in_bonds[y].append(b)
+            for bond in mol.GetBonds():
+                a1 = bond.GetBeginAtom()
+                a2 = bond.GetEndAtom()
+                x = a1.GetIdx()
+                y = a2.GetIdx()
 
-                    b = len(all_bonds)
-                    all_bonds.append((y,x))
-                    fbonds.append( torch.cat([fatoms[y], bond_features(bond)], 0) )
-                    in_bonds[x].append(b)
+                b = len(all_bonds)
+                all_bonds.append((x, y))
+                fbonds.append(torch.cat([fatoms[x], bond_features(bond)], 0))
+                in_bonds[y].append(b)
 
-                total_bonds = len(all_bonds)
-                fatoms = torch.stack(fatoms, 0) 
-                fbonds = torch.stack(fbonds, 0) 
-                agraph = torch.zeros(n_atoms,6).long() # 6 is the max number of bond
-                bgraph = torch.zeros(total_bonds,6).long()
-                for a in range(n_atoms):
-                    for i,b in enumerate(in_bonds[a]):
-                        agraph[a,i] = b
+                b = len(all_bonds)
+                all_bonds.append((y, x))
+                fbonds.append(torch.cat([fatoms[y], bond_features(bond)], 0))
+                in_bonds[x].append(b)
 
-                for b1 in range(1, total_bonds):
-                    x,y = all_bonds[b1]
-                    for i,b2 in enumerate(in_bonds[x]):
-                        if all_bonds[b2][0] != y:
-                            bgraph[b1,i] = b2
+            total_bonds = len(all_bonds)
+            fatoms = torch.stack(fatoms, 0)
+            fbonds = torch.stack(fbonds, 0)
+            agraph = torch.zeros(n_atoms, 6).long()  # 6 is the max number of bond
+            bgraph = torch.zeros(total_bonds, 6).long()
+            for a in range(n_atoms):
+                for i, b in enumerate(in_bonds[a]):
+                    agraph[a, i] = b
 
-            except: 
-                print('When run DeepPurpose model, molecules not found and change to zero vectors..')
-                fatoms = torch.zeros(0,39)
-                fbonds = torch.zeros(0,50)
-                agraph = torch.zeros(0,6)
-                bgraph = torch.zeros(0,6)
+            for b1 in range(1, total_bonds):
+                x, y = all_bonds[b1]
+                for i, b2 in enumerate(in_bonds[x]):
+                    if all_bonds[b2][0] != y:
+                        bgraph[b1, i] = b2
             Natom, Nbond = fatoms.shape[0], fbonds.shape[0]
 
             atoms_completion_num = MAX_SMI_LEN - fatoms.shape[0]  # MAX_ATOM = 100
@@ -227,7 +238,7 @@ class CPIDataset(InMemoryDataset):
             bgraph = torch.cat([bgraph.float(), torch.zeros(bonds_completion_num, 6)], 0)
             shape_tensor = torch.Tensor([Natom, Nbond]).view(1,-1)
             mpnn.append([fatoms.float(), fbonds.float(), agraph.float(), bgraph.float(), shape_tensor.float()])
-        mpnn = np.array(mpnn)
+        mpnn = np.array([[t.numpy() for t in row] for row in mpnn], dtype=object)
         # print(f'Generate MPNN feature with size of {mpnn.shape}')
         np.save(f'{self.com_feat_dir}/dp_mpnn.npy', mpnn)
         return
@@ -424,6 +435,7 @@ class CPIDataset(InMemoryDataset):
         dp_pro = []
         for pro, seq in self.pro_dic.items():
             dp_pro.append([CHARPROTSET[i] for i in seq])
+        dp_pro = np.array(dp_pro, dtype=object)
         np.save(f'{self.pro_feat_dir}/dp_pro.npy', dp_pro)
         return
 

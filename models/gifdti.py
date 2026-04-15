@@ -192,10 +192,8 @@ class RelativeMultiHeadAttention(nn.Module):
         score = (content_score + pos_score) / self.sqrt_dim
 
         if mask is not None:
-            # mask = mask.unsqueeze(1)
-            # score.masked_fill_(mask, -1e9)
-            mask = mask.unsqueeze(1).unsqueeze(2)
-            score.masked_fill(mask == 0, -1e9)
+            mask = mask.to(torch.bool).unsqueeze(1).unsqueeze(2)
+            score = score.masked_fill(mask, -1e9)
         attn = F.softmax(score, -1)
         context = torch.matmul(attn, value).transpose(1, 2)
         context = context.contiguous().view(batch_size, -1, self.d_model)
@@ -344,7 +342,16 @@ class CNNFormerDTI(nn.Module):
         self.fc3 = nn.Linear(1024, 512)
         self.out = nn.Linear(512, 1)
 
+    def _masked_pool(self, features, pad_mask):
+        valid = (~pad_mask).unsqueeze(-1).float()
+        masked_max = features.masked_fill(pad_mask.unsqueeze(-1), float('-inf')).amax(dim=1)
+        masked_max = torch.nan_to_num(masked_max, nan=0.0, posinf=0.0, neginf=0.0)
+        masked_avg = (features * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
+        return torch.cat([masked_max, masked_avg], dim=1)
+
     def forward(self, drug, protein, drug_mask, protein_mask):
+        drug_mask = drug_mask.to(torch.bool)
+        protein_mask = protein_mask.to(torch.bool)
         drug_embed = self.drug_embed(drug)
         protein_embed = self.protein_embed(protein)
         """Feature extractor"""
@@ -365,35 +372,10 @@ class CNNFormerDTI(nn.Module):
         protein_feature_a = protein_feature_a * protein_attention.unsqueeze(2)
 
         """"Predictor"""
-        d_max_len = drug_feature.shape[1]
-        d_max_feature_a = F.max_pool1d(drug_feature_a.permute(0, 2, 1), kernel_size=d_max_len, stride=1,
-                                     padding=0, dilation=1, ceil_mode=False,
-                                     return_indices=False).squeeze(2)
-        d_avg_feature_a = F.avg_pool1d(drug_feature_a.permute(0, 2, 1), kernel_size=d_max_len, stride=1,
-                                     padding=0, ceil_mode=False).squeeze(2)
-        drug_feature_a = torch.cat([d_max_feature_a, d_avg_feature_a], dim=1)
-
-        d_max_feature = F.max_pool1d(drug_feature.permute(0, 2, 1), kernel_size=d_max_len, stride=1,
-                                       padding=0, dilation=1, ceil_mode=False,
-                                       return_indices=False).squeeze(2)
-        d_avg_feature = F.avg_pool1d(drug_feature.permute(0, 2, 1), kernel_size=d_max_len, stride=1,
-                                       padding=0, ceil_mode=False).squeeze(2)
-        drug_feature = torch.cat([d_max_feature, d_avg_feature], dim=1)
-
-
-        p_max_len = protein_feature.shape[1]
-        p_max_feature_a = F.max_pool1d(protein_feature_a.permute(0, 2, 1), kernel_size=p_max_len, stride=1,
-                                     padding=0, dilation=1, ceil_mode=False,
-                                     return_indices=False).squeeze(2)
-        p_avg_feature_a = F.avg_pool1d(protein_feature_a.permute(0, 2, 1), kernel_size=p_max_len, stride=1,
-                                     padding=0, ceil_mode=False).squeeze(2)
-        protein_feature_a = torch.cat([p_max_feature_a, p_avg_feature_a], dim=1)
-        p_max_feature = F.max_pool1d(protein_feature.permute(0, 2, 1), kernel_size=p_max_len, stride=1,
-                                       padding=0, dilation=1, ceil_mode=False,
-                                       return_indices=False).squeeze(2)
-        p_avg_feature = F.avg_pool1d(protein_feature.permute(0, 2, 1), kernel_size=p_max_len, stride=1,
-                                       padding=0, ceil_mode=False).squeeze(2)
-        protein_feature = torch.cat([p_max_feature, p_avg_feature], dim=1)
+        drug_feature_a = self._masked_pool(drug_feature_a, drug_mask)
+        drug_feature = self._masked_pool(drug_feature, drug_mask)
+        protein_feature_a = self._masked_pool(protein_feature_a, protein_mask)
+        protein_feature = self._masked_pool(protein_feature, protein_mask)
 
         iner_f = torch.mul(drug_feature_a, protein_feature_a)
         pair = torch.cat([drug_feature, iner_f, protein_feature], dim=1)
@@ -404,8 +386,6 @@ class CNNFormerDTI(nn.Module):
         fully2 = self.dropout3(fully2)
         fully3 = F.leaky_relu(self.fc3(fully2),0.01)
         predict = self.out(fully3)
-        if self.task == 'classification':
-             predict = torch.sigmoid(predict)
         return predict
 
 
@@ -470,7 +450,7 @@ def collate_fn(batch_data):
         else:
             protein_mask[num, :pro_len] = 1
 
-        labels_new[num] = np.int(float(label))
+        labels_new[num] = int(float(label))
         coms.append(com)
         pros.append(pro)
 
@@ -516,7 +496,7 @@ class collate_class():
             else:
                 protein_mask[num, :pro_len] = 1
 
-            labels_new[num] = np.int(float(label))
+            labels_new[num] = int(float(label))
             coms.append(com)
             pros.append(pro)
         return (coms, pros, compound_new, protein_new, compound_mask, protein_mask, labels_new)

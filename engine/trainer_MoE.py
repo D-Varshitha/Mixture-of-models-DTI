@@ -1,4 +1,7 @@
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 import os
 import torch
 import pandas as pd
@@ -32,7 +35,7 @@ def train_moe(train_loader, model, loss_fn, optimizer, args, valid_loader=None):
         if args.print_out:
             print(f"Epoch {epoch} | Total Loss: {epoch_loss:.4f} | Main Loss: {epoch_main_loss:.4f} | Aux Loss: {epoch_aux_loss:.4f}")
 
-        if wandb.run is not None:
+        if wandb is not None and wandb.run is not None:
             wandb.log({
                 'Train Total Loss': epoch_loss,
                 'Train Main Loss': epoch_main_loss,
@@ -90,7 +93,7 @@ def test_moe(loader, model, loss_fn, args, split='Test', epoch=0):
     if args.print_out:
         print(f"[{split}] Total Loss: {total_loss:.4f} | Main Loss: {total_main_loss:.4f} | Aux Loss: {total_aux_loss:.4f}")
 
-    if wandb.run is not None:
+    if wandb is not None and wandb.run is not None:
         wandb.log({
             f'{split} Total Loss': total_loss,
             f'{split} Main Loss': total_main_loss,
