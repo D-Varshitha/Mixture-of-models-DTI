@@ -98,7 +98,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    data_name    = args.data if args.data else 'kiba'
+    data_name    = args.data if args.data else 'davis'
     label_col    = 'lab' if args.task == 'classification' else 'affinity'
     args.label   = label_col   # keep args.label in sync so trainer metrics use correct column
     dataset_root = os.getcwd()

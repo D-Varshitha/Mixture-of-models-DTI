@@ -263,12 +263,6 @@ class SharedGatingNetwork(nn.Module):
         logits = self.gate_mlp(rep)                               # [B, num_experts]
         return logits
 
-
-# ---------------------------------------------------------------------------
-# Final Aggregation MLP
-# ---------------------------------------------------------------------------
-
-
 # ---------------------------------------------------------------------------
 # DTI Sparse MoE
 # ---------------------------------------------------------------------------
@@ -370,7 +364,7 @@ class DTI_Sparse_MoE(nn.Module):
 
             expert = self.experts[expert_name]
 
-            run_indices = selected_indices
+            run_indices = selected_indices.cpu()
 
             if expert_name == 'dp':
                 # DeepPurpose features are already padded by robust moe_collate_fn

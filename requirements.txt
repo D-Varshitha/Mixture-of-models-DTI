@@ -10,3 +10,4 @@ tqdm
 bidict
 prefetch-generator
 wandb
+ogb
