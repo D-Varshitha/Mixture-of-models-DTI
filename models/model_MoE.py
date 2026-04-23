@@ -54,7 +54,8 @@ class PositionalEncoding(nn.Module):
         if target_len <= self.pe.size(0):
             return
         new_pe = self._build_pe(target_len).to(device=device)
-        self.pe = new_pe
+        # FIX 3: Re-register as buffer so state_dict saves it and .to(device) moves it.
+        self.register_buffer('pe', new_pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, L, D]
@@ -186,17 +187,21 @@ class AttentionPool(nn.Module):
         )
 
     def forward(self, token_embs: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        # token_embs: [B, L, D]
-        # mask: [B, L] bool, True indicates padding
-        
-        scores = self.attn_proj(token_embs).squeeze(-1) # [B, L]
-        if mask is not None and mask.shape[1] == scores.shape[1]:
+        # token_embs: [B, L, D]  |  mask: [B, L] bool, True = padding
+        scores = self.attn_proj(token_embs).squeeze(-1)  # [B, L]
+        if mask is not None:
+            # Trim to the shorter length — chunked encoder can produce L±1
+            # compared to the padded mask, so we align them explicitly.
+            if mask.shape[1] != scores.shape[1]:
+                min_len    = min(mask.shape[1], scores.shape[1])
+                mask       = mask[:, :min_len]
+                scores     = scores[:, :min_len]
+                token_embs = token_embs[:, :min_len, :]
             scores = scores.masked_fill(mask, float('-inf'))
-        
-        attn_weights = F.softmax(scores, dim=-1) # [B, L]
-        attn_weights = torch.nan_to_num(attn_weights, nan=0.0) # Handle all-pad edge case
-        
-        rep = torch.sum(attn_weights.unsqueeze(-1) * token_embs, dim=1) # [B, D]
+
+        attn_weights = F.softmax(scores, dim=-1)                           # [B, L]
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)             # all-pad guard
+        rep = torch.sum(attn_weights.unsqueeze(-1) * token_embs, dim=1)   # [B, D]
         return rep
 
 
@@ -301,6 +306,12 @@ class DTI_Sparse_MoE(nn.Module):
         self.k            = k
         self.lambda_aux   = lambda_aux
 
+        # FIX 5: Guard k does not exceed num_experts (topk would silently panic)
+        assert self.k <= self.num_experts, (
+            f"top_k={self.k} exceeds num_experts={self.num_experts}. "
+            f"Set --top_k <= {self.num_experts}."
+        )
+
         # Gating network  (uses token-level embeddings internally)
         self.gate = SharedGatingNetwork(
             drug_vocab, prot_vocab, num_experts=self.num_experts
@@ -340,24 +351,27 @@ class DTI_Sparse_MoE(nn.Module):
         # Normalize selected weights to sum to 1
         w = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-6)     # [B, k]
 
-        # FIX 6: Enabled expert routing prints (controlled by MOE_DEBUG_ROUTING env var)
-        if os.environ.get("MOE_DEBUG_ROUTING", "0") == "1":
-            for i in range(B):
-                selected = [self.expert_keys[idx] for idx in top_k_indices[i].tolist()]
-                print(f"Sample {i} -> {selected}")
+        # =====================================================================
+        # OPTIONAL: Trace Routing Decisions per Sample
+        # Prints the Drug-Protein IDs and the 2 experts they selected so you
+        # can track specific samples across different epochs!
+        # =====================================================================
+        expert_names = [[self.expert_keys[idx] for idx in sample_indices] for sample_indices in top_k_indices.tolist()]
+        
+        print("\n--- Batch Routing Sample Check ---")
+        for i in range(B):
+            drug = batch['com_id'][i]
+            prot = batch['pro_id'][i]
+            print(f"Sample: {drug[:10]}... & {prot[:10]}...  -->  Selected: {expert_names[i]}")
 
         # ---- 2. Expert dispatch ---------------------------------------
         # Collect weighted scalar per expert slot: [B, num_experts]
         expert_preds = torch.zeros(B, self.num_experts, device=device)
 
-        # Track empirical routing fractions for aux loss (not differentiable)
-        routing_fractions = torch.zeros(self.num_experts, device=device)
-
         for exp_idx, expert_name in enumerate(self.expert_keys):
             # Which samples selected this expert?
             mask             = (top_k_indices == exp_idx).any(dim=-1)  # [B]
             selected_indices = mask.nonzero(as_tuple=True)[0]
-            routing_fractions[exp_idx] = len(selected_indices) / B
 
             if len(selected_indices) == 0:
                 continue  # Expert not used in this batch

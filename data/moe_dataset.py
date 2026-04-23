@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 import numpy as np
@@ -25,17 +26,22 @@ _REQUIRED_PRO_FILES = {
 
 class MoEDataset(CPIDataset):
     def __init__(self, root, dataset_name, MAX_SMI_LEN=100, MAX_SEQ_LEN=1000,
-                 label_type='label', mode='load', subset_size=None):
+                 label_type='label', mode='generate', subset_size=None):
         super(MoEDataset, self).__init__(root, dataset_name, label_type, mode, subset_size=subset_size)
 
         self.MAX_SMI_LEN = MAX_SMI_LEN
         self.MAX_SEQ_LEN = MAX_SEQ_LEN
         self.mode = mode
 
-        self.shared_emb_dir = os.path.join(self.root, 'dataset', self.dataset, 'shared_emb')
-        self.drug_emb_dir = os.path.join(self.shared_emb_dir, 'drug')
-        self.prot_emb_dir = os.path.join(self.shared_emb_dir, 'protein')
-        self.shared_meta_path = os.path.join(self.shared_emb_dir, 'metadata.json')
+        # GATING: Unified generator for dynamic pretrained embeddings (NO disk storage)
+        self.generator = PretrainedEmbeddingGenerator(
+            esm_model_name=args.esm_model_name,
+            chembert_model_name=args.chembert_model_name,
+            cache_dir=args.hf_cache_dir,
+            device='cuda' if torch.cuda.is_available() and args.device != 'cpu' else 'cpu',
+            protein_chunk_len=args.protein_chunk_len,
+            protein_chunk_stride=args.protein_chunk_stride,
+        )
         self._drug_emb_cache = {}
         self._prot_emb_cache = {}
 
@@ -48,7 +54,6 @@ class MoEDataset(CPIDataset):
             self.process_molecule(MAX_SMI_LEN, 'mpnn')
             self.process_protein(MAX_SEQ_LEN, 'mdprd')
             self.process_protein(MAX_SEQ_LEN, 'dp')
-            self._generate_shared_embeddings()
 
         self._validate_required_feature_files()
         self.fp_2048 = self.get_fp(2048)
@@ -57,17 +62,14 @@ class MoEDataset(CPIDataset):
         self.dp_pro_data = self.get_dp
         self.mdprd_data = self.get_mdprd
 
-        self._validate_shared_embeddings()
+        # Detect hidden sizes dynamically for validation/routing checks
+        self.chembert_hidden_size = self.generator.chembert_hidden_size
+        self.esm_hidden_size = self.generator.esm_hidden_size
+
         self.validate_features()
 
     def __len__(self):
         return self.num_interaction
-
-    def _shared_drug_path(self, cid: int) -> str:
-        return os.path.join(self.drug_emb_dir, f'drug_{cid}.pt')
-
-    def _shared_prot_path(self, pid: int) -> str:
-        return os.path.join(self.prot_emb_dir, f'protein_{pid}.pt')
 
     def _validate_required_feature_files(self):
         missing = []
@@ -85,103 +87,36 @@ class MoEDataset(CPIDataset):
                 f"[MoEDataset] Missing required precomputed feature files for '{self.dataset}':\n{msg}"
             )
 
-    def _generate_shared_embeddings(self):
-        generator = PretrainedEmbeddingGenerator(
-            esm_model_name=args.esm_model_name,
-            chembert_model_name=args.chembert_model_name,
-            cache_dir=args.hf_cache_dir,
-            device='cuda' if torch.cuda.is_available() and args.device != 'cpu' else 'cpu',
-            protein_chunk_len=args.protein_chunk_len,
-            protein_chunk_stride=args.protein_chunk_stride,
-        )
-        drug_texts = [self.lig_dic[self.lig_mapping[idx]] for idx in range(self.num_lig)]
-        prot_texts = [self.pro_dic[self.pro_mapping[idx]] for idx in range(self.num_pro)]
-        drug_paths = [self._shared_drug_path(cid) for cid in range(self.num_lig)]
-        prot_paths = [self._shared_prot_path(pid) for pid in range(self.num_pro)]
-        generator.generate_and_save(
-            drug_texts=drug_texts,
-            prot_texts=prot_texts,
-            drug_paths=drug_paths,
-            prot_paths=prot_paths,
-            metadata_path=self.shared_meta_path,
-        )
-
-    def _validate_shared_embeddings(self):
-        if not os.path.exists(self.shared_meta_path):
-            raise RuntimeError(
-                f"[MoEDataset] Missing shared embedding metadata: {self.shared_meta_path}. "
-                "Run with --get-dataset generate to build real pretrained ESM/ChemBERT embeddings."
-            )
-        with open(self.shared_meta_path, "r", encoding="utf-8") as f:
-            self.shared_meta = json.load(f)
-
-        required_meta = [
-            "esm_model_name", "chembert_model_name",
-            "esm_hidden_size", "chembert_hidden_size",
-            "num_drugs", "num_proteins",
-        ]
-        missing_meta = [k for k in required_meta if k not in self.shared_meta]
-        if missing_meta:
-            raise RuntimeError(f"[MoEDataset] Shared embedding metadata missing keys: {missing_meta}")
-
-        if int(self.shared_meta["num_drugs"]) != self.num_lig:
-            raise RuntimeError(
-                f"[MoEDataset] Shared drug embedding count mismatch: "
-                f"{self.shared_meta['num_drugs']} vs num_lig={self.num_lig}"
-            )
-        if int(self.shared_meta["num_proteins"]) != self.num_pro:
-            raise RuntimeError(
-                f"[MoEDataset] Shared protein embedding count mismatch: "
-                f"{self.shared_meta['num_proteins']} vs num_pro={self.num_pro}"
-            )
-        if self.shared_meta["esm_model_name"] != args.esm_model_name:
-            raise RuntimeError(
-                f"[MoEDataset] Shared ESM cache mismatch: "
-                f"{self.shared_meta['esm_model_name']} vs requested {args.esm_model_name}"
-            )
-        if self.shared_meta["chembert_model_name"] != args.chembert_model_name:
-            raise RuntimeError(
-                f"[MoEDataset] Shared ChemBERT cache mismatch: "
-                f"{self.shared_meta['chembert_model_name']} vs requested {args.chembert_model_name}"
-            )
-
-        missing_files = []
-        for cid in range(self.num_lig):
-            if not os.path.exists(self._shared_drug_path(cid)):
-                missing_files.append(self._shared_drug_path(cid))
-        for pid in range(self.num_pro):
-            if not os.path.exists(self._shared_prot_path(pid)):
-                missing_files.append(self._shared_prot_path(pid))
-        if missing_files:
-            raise RuntimeError(
-                f"[MoEDataset] Missing cached shared embedding files. First missing path: {missing_files[0]}"
-            )
-
-        self.chembert_hidden_size = int(self.shared_meta["chembert_hidden_size"])
-        self.esm_hidden_size = int(self.shared_meta["esm_hidden_size"])
-
-    def _load_shared_embedding(self, kind: str, idx: int) -> torch.Tensor:
+    def _get_dynamic_shared_embedding(self, kind: str, text: str, idx: int) -> torch.Tensor:
+        """Computes or retrieves from RAM cache (NOT disk) the ESM/ChemBERT embeddings."""
         cache = self._drug_emb_cache if kind == 'drug' else self._prot_emb_cache
         if idx not in cache:
-            path = self._shared_drug_path(idx) if kind == 'drug' else self._shared_prot_path(idx)
-            payload = torch.load(path, map_location='cpu')
-            emb = payload["embedding"] if isinstance(payload, dict) else payload
-            if not isinstance(emb, torch.Tensor):
-                raise RuntimeError(f"[MoEDataset] Shared embedding payload must be a tensor at {path}")
-            cache[idx] = emb.to(torch.float32)
+            if kind == 'drug':
+                cache[idx] = self.generator.embed_drug(text).to(torch.float32)
+            else:
+                cache[idx] = self.generator.embed_protein(text).to(torch.float32)
         return cache[idx]
 
     def __getitem__(self, ind):
         cid = self.lig_mapping.inverse[self.lig[ind]]
         pid = self.pro_mapping.inverse[self.pro[ind]]
-        label = torch.tensor(self.label[ind], dtype=torch.float32)
+        raw_label = self.label[ind]
+
+        # For regression, Davis stores raw Kd in nM → convert to pKd = -log10(Kd/1e9)
+        # This brings labels into the ~5–11 range where MSE is meaningful.
+        # KIBA scores are already in a usable range, so no transform is applied.
+        if self.label_type == 'affinity':
+            pkd = -math.log10(max(float(raw_label), 1e-10) / 1e9)
+            label = torch.tensor(pkd, dtype=torch.float32)
+        else:
+            label = torch.tensor(raw_label, dtype=torch.float32)
 
         smi = self.lig_dic[self.lig[ind]]
         seq = self.pro_dic[self.pro[ind]]
 
-        # ---- 1. Gating Network: Uses SHARED precomputed embeddings ----
-        drug_tok = self._load_shared_embedding('drug', cid)
-        prot_tok = self._load_shared_embedding('protein', pid)
+        # ---- 1. Gating Network: Now generates embeddings dynamically (NO disk storage) ----
+        drug_tok = self._get_dynamic_shared_embedding('drug', smi, cid)
+        prot_tok = self._get_dynamic_shared_embedding('protein', seq, pid)
         
         batch_dict = {
             'com_id': self.lig[ind],
@@ -213,7 +148,7 @@ class MoEDataset(CPIDataset):
         batch_dict['gifdti_com_mask'] = (batch_dict['gifdti_com'] == 0)
         batch_dict['gifdti_pro_mask'] = (batch_dict['gifdti_pro'] == 0)
 
-        # 2c. Expert: DCDTI (Requires Fingerprints + Protein Tokens)
+        # 2c. Expert: DCDTI — 2048-dim Morgan FP + independent protein IDs
         batch_dict['dcdti_com'] = torch.tensor(self.fp_2048[cid], dtype=torch.float32)
         # DeepConvDTI expects standard AA tokens (indices 0-25) at current construction (2500 vocab)
         batch_dict['dcdti_pro'] = batch_dict['dpdta_pro']
@@ -235,12 +170,12 @@ class MoEDataset(CPIDataset):
         batch_dict['dp_bg']  = torch.tensor(mpnn_val[3], dtype=torch.float32)
         batch_dict['dp_abn'] = torch.tensor(mpnn_val[4], dtype=torch.float32)
         
-        # DeepPurpose CNN encoder expects [26, L] one-hot matrix
-        dp_pro = build_one_hot_enc(seq, 1000, CHARPROTSET) # [1000, 25] -> we need [26, 1000]
-        # Pad/reshaping to [26, 1000] (0 for padding, 1-25 for AAs)
+        # DeepPurpose CNN encoder expects [26, 1000] one-hot (row=AA index, col=position)
+        # Row 0 = padding (never set); rows 1-25 = amino acids from CHARPROTSET
         dp_pro_tensor = torch.zeros(26, 1000, dtype=torch.float32)
         for i, val in enumerate(seq_enc_std[:1000]):
-            dp_pro_tensor[val, i] = 1.0
+            if val > 0:  # skip val=0 (padding/unknown) to keep row-0 all-zero
+                dp_pro_tensor[val, i] = 1.0
         batch_dict['dp_pro'] = dp_pro_tensor
 
         return batch_dict
@@ -292,8 +227,10 @@ class MoEDataset(CPIDataset):
             if fp1024.ndim != 1 or fp1024.shape[0] != 1024:
                 raise RuntimeError(f"[MoEDataset] Invalid 1024-bit Morgan fingerprint for cid={cid}: shape={fp1024.shape}")
 
-            drug_tok = self._load_shared_embedding('drug', cid)
-            prot_tok = self._load_shared_embedding('protein', pid)
+            smi = self.lig_dic[self.lig[ind]]
+            seq = self.pro_dic[self.pro[ind]]
+            drug_tok = self._get_dynamic_shared_embedding('drug', smi, cid)
+            prot_tok = self._get_dynamic_shared_embedding('protein', seq, pid)
             if drug_tok.ndim != 2 or drug_tok.shape[0] <= 0 or drug_tok.shape[1] != self.chembert_hidden_size:
                 raise RuntimeError(f"[MoEDataset] Invalid ChemBERT token embeddings for cid={cid}: shape={tuple(drug_tok.shape)}")
             if prot_tok.ndim != 2 or prot_tok.shape[0] <= 0 or prot_tok.shape[1] != self.esm_hidden_size:
@@ -355,7 +292,7 @@ def moe_collate_fn(batch):
     
     # 1. Define groups of keys by their padding requirements
     # Keys that need [PaddedTensor, Mask] return
-    seq_keys = ['shared_drug', 'shared_prot', 'gifdti_com', 'gifdti_pro']
+    seq_keys = ['shared_drug', 'shared_prot']
     
     # Experts that use lists of (padded) atom/bond features
     graph_keys = ['dp_af', 'dp_bf', 'dp_ag', 'dp_bg', 'dp_abn']
@@ -379,7 +316,10 @@ def moe_collate_fn(batch):
         collated['pcpi_graph'] = [sample['pcpi_graph'] for sample in batch]
 
     # 4. Handle everything else with default_collate
-    processed_keys = set(collated.keys()) | set(seq_keys) | set(graph_keys) | {'pcpi_graph'}
+    # FIX 4: Include mask keys written into collated by _pad_tensor_list so they
+    # are NOT re-processed by default_collate (would overwrite padded results).
+    mask_keys = {f"{k}_mask" for k in seq_keys}
+    processed_keys = set(collated.keys()) | set(seq_keys) | mask_keys | set(graph_keys) | {'pcpi_graph'}
     remaining_keys = [k for k in batch[0].keys() if k not in processed_keys]
     
     if remaining_keys:

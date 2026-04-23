@@ -1,22 +1,17 @@
+# FIX 12: Only import the mandatory runtime dependencies at module level.
+# Heavy/optional standalone-script imports are guarded under __main__ to
+# avoid ImportError on servers that don't have prefetch_generator or tqdm.
 import random
 import os
-from torch.utils.data import Dataset, DataLoader
-from prefetch_generator import BackgroundGenerator
-from datetime import datetime
-from tqdm import tqdm
-import timeit, pickle
-import numpy as np
-import pandas as pd
 import math
+import numpy as np
 import torch
 import torch.nn as nn
-import argparse
 import torch.nn.functional as F
-from torch import Tensor
 import torch.nn.init as init
-from typing import Tuple
-from typing import Optional
-from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, f1_score, recall_score,precision_recall_curve, auc
+from torch import Tensor
+from torch.utils.data import Dataset, DataLoader
+from typing import Tuple, Optional
 
 
 
@@ -600,6 +595,16 @@ def shuffle_dataset(dataset, seed):
     return dataset
 
 if __name__ == "__main__":
+    # Standalone-only imports — NOT needed when used as MoE expert
+    import argparse
+    import pickle
+    import pandas as pd
+    import timeit
+    from datetime import datetime
+    from tqdm import tqdm
+    from prefetch_generator import BackgroundGenerator
+    from sklearn.metrics import (accuracy_score, roc_auc_score, precision_score,
+                                 f1_score, recall_score, precision_recall_curve, auc)
 
     args = argument_parser()
 

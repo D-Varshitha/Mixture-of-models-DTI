@@ -1,10 +1,17 @@
 import numpy as np
 import torch
-from torch_geometric.data import Data
-from rdkit import Chem
 from itertools import product
 from collections import defaultdict
 import json
+
+try:
+    from torch_geometric.data import Data
+    _TG_AVAILABLE = True
+except ImportError:
+    _TG_AVAILABLE = False
+    Data = None  # build_mol_graph will raise clearly if called without torch_geometric
+
+from rdkit import Chem
 
 
 
@@ -69,11 +76,11 @@ def build_one_hot_enc(line, max_len, chars):
 		X[i, (chars[ch]-1)] = 1 
 	return X #.tolist()
 
-def build_seq_enc(line, chars):
-    X = []
-    for i,ch in enumerate(line):
-        X.append(chars[ch])
-    return X
+def build_seq_enc(line, chars, unknown_idx=0):
+    """Encode a character sequence using a vocabulary dict.
+    Unknown characters map to unknown_idx (default 0 = padding) instead of raising KeyError.
+    """
+    return [chars.get(ch, unknown_idx) for ch in line]
 
 def build_ngram(seq, N, dic):
     seq = '-' + seq + '='

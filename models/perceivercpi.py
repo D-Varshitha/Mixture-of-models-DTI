@@ -229,8 +229,8 @@ class PerceiverCPI(nn.Module):
 
     def __init__(
         self,
-        atom_dim:     int   = 72,          # chemprop default atom feature dim
-        bond_dim:     int   = 14,          # chemprop default bond feature dim
+        atom_dim:     int   = 5,           # matches moe_dataset _get_rdkit_graph: [AtomicNum,Degree,FormalCharge,NumExplicitHs,IsAromatic]
+        bond_dim:     int   = 3,           # matches moe_dataset _get_rdkit_graph: [BondType, IsInRing, IsConjugated]
         prot_vocab:   int   = 26,          # AA vocab (+1 for padding idx 0)
         hidden_size:  int   = 128,         # shared hidden dimension D
         # CHANGED: DeepPurpose-style heterogeneous CNN filter/kernel lists
@@ -277,15 +277,16 @@ class PerceiverCPI(nn.Module):
             in_ch = f
         self.prot_convs = nn.ModuleList(prot_cnn_layers)
 
-        # CHANGED: flatten → FC (matches DeepPurpose CNN readout exactly)
+        # last_filter is the output channel count of the final CNN layer
         last_filter = cnn_filters[-1]
-        self.prot_fc = nn.Linear(last_filter * prot_seq_len, hidden_size)
 
         # CHANGED: project CNN token dim (last_filter) to hidden_size for CAB
         self.prot_token_proj = (
             nn.Linear(last_filter, hidden_size)
             if last_filter != hidden_size else nn.Identity()
         )
+        # NOTE: prot_fc (flat readout) is intentionally NOT included here since
+        # the CAB path uses token-level output from _encode_prot, not a flat vector.
 
         # ---- Cross-Attention Block ------------------------------------------
         self.cab = CrossAttentionBlock(hidden_size, n_heads=n_heads,

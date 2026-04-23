@@ -20,14 +20,17 @@ def calculate_performance(df, args):
 
 # 'Acc','Pre','Rec','Spe','AUC','BA'
 def calculate_performance_classification(df,args): # df with columns 'label', 'pred'
-    # print(df)
-    pred = np.array(df['pred']).round().tolist()
+    # Raw probabilities for AUC
+    prob = np.array(df['pred'])
+    # Rounded predictions for Acc, Pre, Rec, etc.
+    pred = prob.round().tolist()
     label = df[args.label]
+    
     acc_ = acc(label, pred)
     pre_ = pre(label, pred)
     rec_ = rec(label, pred)
     try:
-        auc_ = auc(label, pred)
+        auc_ = auc(label, prob)
     except Exception:
         auc_ = 0.0
     ba_ = ba(label, pred)
@@ -37,16 +40,24 @@ def calculate_performance_classification(df,args): # df with columns 'label', 'p
     return [acc_, pre_, rec_, spe_, auc_, ba_]
 
 
-# 'MSE', 'RMSE', 'pearson', 'spearman', 'CI',
-def calculate_performance_regression(df,args): # df with columns 'label', 'pred'
-    pred = np.array(df['pred'])
+def calculate_performance_regression(df, args):
+    pred  = np.array(df['pred'])
     label = np.array(df[args.label])
-    rmse_ = rmse(label, pred)
-    mse_ = mse(label, pred)
-    pearson_ = pearson(label, pred)
-    spearman_ = spearman(label, pred)
-    ci_ = ci(label, pred)
-    return mse_, rmse_, pearson_, spearman_, ci_
+    mse_      = mse(label, pred)
+    rmse_     = rmse(label, pred)
+    # pearson/spearman return NaN when predictions are constant (e.g. early epochs)
+    try:
+        pearson_  = pearson(label, pred)
+        if not np.isfinite(pearson_): pearson_ = 0.0
+    except Exception:
+        pearson_ = 0.0
+    try:
+        spearman_ = spearman(label, pred)
+        if not np.isfinite(spearman_): spearman_ = 0.0
+    except Exception:
+        spearman_ = 0.0
+    ci_       = ci(label, pred)
+    return [mse_, rmse_, pearson_, spearman_, ci_]
 
 def rmse(y,f):
     rmse = sqrt(((y - f)**2).mean(axis=0))
@@ -60,18 +71,18 @@ def pearson(y,f):
 def spearman(y,f):
     rs = stats.spearmanr(y, f)[0]
     return rs
-def ci(y,f):
+def ci(y, f):
     ind = np.argsort(y)
     y = y[ind]
     f = f[ind]
-    i = len(y)-1
-    j = i-1
+    i = len(y) - 1
+    j = i - 1
     z = 0.0
     S = 0.0
     while i > 0:
         while j >= 0:
             if y[i] > y[j]:
-                z = z+1
+                z = z + 1
                 u = f[i] - f[j]
                 if u > 0:
                     S = S + 1
@@ -79,6 +90,5 @@ def ci(y,f):
                     S = S + 0.5
             j = j - 1
         i = i - 1
-        j = i-1
-    ci = S/z
-    return ci
+        j = i - 1
+    return S / z if z > 0 else 0.0   # guard: z=0 when all labels are identical

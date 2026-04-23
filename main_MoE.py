@@ -1,17 +1,16 @@
 import torch
 import os
 import sys
+import copy
 import random
 import numpy as np
-try:
-    import wandb
-except ImportError:
-    wandb = None
+import time
+import json
+import pandas as pd
 from torch import nn
 from tqdm import trange
 
-from data import split_dataset_by_fold
-from data.moe_dataset import MoEDataset
+from data.moe_dataset import MoEDataset, moe_collate_fn
 from models import build_model
 from models.model_MoE import DTI_Sparse_MoE
 from engine.trainer_MoE import train_moe, test_moe
@@ -74,7 +73,7 @@ def _build_experts_and_model(args, device):
         'perceivercpi': build_model('perceivercpi', args.task),
     }
     moe_model = DTI_Sparse_MoE(
-        experts_dict, drug_vocab=65, prot_vocab=26, k=2, lambda_aux=args.lambda_aux
+        experts_dict, drug_vocab=65, prot_vocab=26, k=args.top_k, lambda_aux=args.lambda_aux
     ).to(device)
     optimizer = torch.optim.Adam(
         moe_model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -83,7 +82,7 @@ def _build_experts_and_model(args, device):
 
 
 def main():
-
+    start_all = time.time()
     # ── Hardware detection ────────────────────────────────────────────────────
     if torch.cuda.is_available() and args.device != 'cpu':
         device = torch.device('cuda')
@@ -100,92 +99,194 @@ def main():
 
     data_name    = args.data if args.data else 'davis'
     label_col    = 'lab' if args.task == 'classification' else 'affinity'
-    args.label   = label_col   # keep args.label in sync so trainer metrics use correct column
+    args.label   = label_col
     dataset_root = os.getcwd()
 
-    # ── FIX 2: Dataset loading ────────────────────────────────────────────────
-    # Logic: In debug mode, we only process a small subset for extreme speed.
-    current_subset = args.subset_size if args.mode == 'debug' else None
-    print(f"Loading Dataset: {data_name} (mode={args.get_dataset}, subset={current_subset})...")
+    print(f"\nLoading dataset: {data_name}  |  task: {args.task}")
+    print(f"  Embeddings  : ESM + ChemBERT — generated dynamically per sample, RAM-cached only")
+    print(f"  Expert feats: fingerprints / MPNN / MDeePred — auto-generated on disk if missing")
+    print(f"  Saved to disk: only the single best model weights\n")
 
-    if args.get_dataset == 'generate':
-        _ = MoEDataset(
-            root=dataset_root, dataset_name=data_name,
-            label_type=label_col, mode='generate', subset_size=current_subset,
-            MAX_SMI_LEN=args.com_len, MAX_SEQ_LEN=args.pro_len,
-        )
-        print("Feature generation done. Reloading dataset...")
+    current_subset = args.subset_size if args.mode == 'debug' else None
 
     dataset = MoEDataset(
         root=dataset_root, dataset_name=data_name,
-        label_type=label_col, mode='load', subset_size=current_subset,
-        MAX_SMI_LEN=args.com_len, MAX_SEQ_LEN=args.pro_len,
+        label_type=label_col, subset_size=current_subset,
+        MAX_SMI_LEN=args.com_len, MAX_SEQ_LEN=args.pro_len, mode=args.get_dataset,
     )
 
-    # ── Debug mode adjustments ────────────────────────────────────────────────
-    if args.mode == 'debug':
-        print(f"DEBUG MODE: Subset of {len(dataset)} items active. Restricting to 1 FOLD.")
-        args.epoch = min(args.epoch, 3)
-        args.batch = min(args.batch, 16)
-        args.exp_mode = 'pure_train'  # Restrict to 1 fold
-
-
-    all_idx = list(range(len(dataset)))
-    random.Random(args.seed).shuffle(all_idx)
-
-    # ── FIX 2: Dataset integrity check ────────────────────────────────────────
     _validate_dataset_integrity(dataset)
 
-    # ── Loss function ─────────────────────────────────────────────────────────
+    # ── Debug mode adjustments ────────────────────────────────────────────────
+    num_folds = 5
+    if args.mode == 'debug':
+        print(f"\n[DEBUG MODE] Subset of {len(dataset)} items active.")
+        print(">> Restricting to 1 FOLD, 3 EPOCHS, and Batch 16 for rapid verification.")
+        args.epoch = min(args.epoch, 3)
+        args.batch = 16
+        num_folds = 1 # Run only one fold in debug mode
+
     if args.task == 'classification':
-        loss_fn     = nn.BCEWithLogitsLoss()
+        loss_fn = nn.BCEWithLogitsLoss()
         args.metrics = metrics_classification
     else:
-        loss_fn     = nn.MSELoss()
+        loss_fn = nn.MSELoss()
         args.metrics = metrics_regression
 
-    # ── K-Fold execution pipeline ─────────────────────────────────────────────
-    print(f"Execution Pipeline starting. Mode={args.mode}")
-    folds_to_run = 5 if args.exp_mode == '5_fold_val' else 1
+    # ── Reference Data Split & Cross-Validation Logic ─────────────────────────
+    indices = list(range(len(dataset)))
+    random.Random(args.seed).shuffle(indices)
+    
+    save_path    = os.path.join(os.getcwd(), 'saved_models')
+    # Include task in results_path so classification and regression outputs never overwrite each other
+    results_path = os.path.join(os.getcwd(), 'results', data_name, args.task)
+    os.makedirs(save_path,    exist_ok=True)
+    os.makedirs(results_path, exist_ok=True)
 
-    for fold in range(folds_to_run):
+    best_results = {}
+    # Two-level best-model tracking:
+    # Level 1 — best epoch within each fold (handled by EarlyStopping in trainer)
+    # Level 2 — best fold across all folds (tracked here)
+    global_best_val_loss    = float('inf')
+    global_best_model_state = None
+    global_best_fold        = -1
+    from data.moe_dataset import moe_collate_fn
+
+    for fold in range(num_folds):
         print(f"\n===== FOLD {fold} =====")
 
-        # ── FIX 4: Re-initialize model + optimizer per fold for valid CV ──────
-        print("Building MoE Model (fresh initialisation for this fold)...")
-        moe_model, optimizer = _build_experts_and_model(args, device)
+        # Deterministic split: sort set before sampling so order is seed-stable
+        if num_folds == 1:
+            fold_size      = int(0.2 * len(indices))
+            test_idx       = indices[:fold_size]
+            train_pool_idx = sorted(set(indices) - set(test_idx))
+            valid_idx      = random.Random(args.seed + fold).sample(
+                                train_pool_idx, int(0.1 * len(train_pool_idx)))
+            train_idx      = sorted(set(train_pool_idx) - set(valid_idx))
+        else:
+            fold_size = int(0.2 * len(indices))
+            if fold == 4:
+                test_idx = indices[fold * fold_size:]
+            else:
+                test_idx = indices[fold * fold_size:(fold + 1) * fold_size]
 
-        from data.data_split import split_dataset_by_fold
-        train_loader, valid_loader, test_loader = split_dataset_by_fold(
-            dataset, all_idx, fold, args.batch
+            train_pool_idx = sorted(set(indices) - set(test_idx))
+            valid_idx      = random.Random(args.seed + fold).sample(
+                                train_pool_idx, int(0.1 * len(train_pool_idx)))
+            train_idx      = sorted(set(train_pool_idx) - set(valid_idx))
+
+        train_loader = torch.utils.data.DataLoader(
+            torch.utils.data.Subset(dataset, train_idx),
+            batch_size=args.batch, shuffle=True, collate_fn=moe_collate_fn, num_workers=0
+        )
+        valid_loader = torch.utils.data.DataLoader(
+            torch.utils.data.Subset(dataset, valid_idx),
+            batch_size=args.batch, shuffle=False, collate_fn=moe_collate_fn, num_workers=0
+        )
+        test_loader = torch.utils.data.DataLoader(
+            torch.utils.data.Subset(dataset, test_idx),
+            batch_size=args.batch, shuffle=False, collate_fn=moe_collate_fn, num_workers=0
         )
 
-        if wandb is not None:
-            wandb.init(
-                project='ensdti-moe',
-                name=f'MoE_{data_name}_fold{fold}',
-                config=args, reinit=True
-            )
+        moe_model, optimizer = _build_experts_and_model(args, device)
 
-        # Train
-        moe_model = train_moe(
+        # Train (EarlyStopping inside picks best epoch → restores weights)
+        moe_model, best_val_metrics, best_val_loss, fold_train_times, fold_val_times, epoch_history = train_moe(
             train_loader, moe_model, loss_fn, optimizer, args,
             valid_loader=valid_loader
         )
 
-        # Test
-        print(f"\nFinal Testing for FOLD {fold}")
-        result, perf = test_moe(test_loader, moe_model, loss_fn, args, split='Test_Final')
+        # ── Save per-fold epoch history for graph plotting ─────────────────────
+        fold_csv = os.path.join(results_path, f'fold_{fold}_epoch_history.csv')
+        pd.DataFrame(epoch_history).to_csv(fold_csv, index=False)
+        print(f"  Epoch history saved → {fold_csv}")
 
-        if args.save_result:
-            out_path = (f'{os.getcwd()}/dataset/{data_name}/moe/'
-                        f'{args.exp_mode}/{args.custom}/fold_{fold}')
-            os.makedirs(out_path, exist_ok=True)
-            result.to_csv(f'{out_path}/test_result.csv', index=False)
-            if args.save_perf:
-                perf.to_csv(f'{out_path}/test_perf.csv', index=False)
-        if wandb is not None and wandb.run is not None:
-            wandb.finish()
+        # ── Level-2: update global best across folds ──────────────────────────────
+        if best_val_loss < global_best_val_loss:
+            global_best_val_loss    = best_val_loss
+            global_best_model_state = copy.deepcopy(moe_model.state_dict())
+            global_best_fold        = fold
+            print(f"  ✓ New global best model  fold={fold}  val_loss={best_val_loss:.4f}")
+
+        # Test at the end of each fold (model already holds best-epoch weights)
+        print(f"\n--- Testing Fold {fold} ---")
+        result, perf, t_loss = test_moe(test_loader, moe_model, loss_fn, args, split=f'Test_Fold_{fold}')
+        final_metrics = perf.iloc[0].to_dict()
+        print(f"Fold {fold} Test Results:", final_metrics)
+
+        best_results[f"fold_{fold}"] = {
+            "best_val_metrics": best_val_metrics,
+            "best_val_loss":    best_val_loss,
+            "test_metrics":     final_metrics,
+            # FIX 2: Guard against empty time lists (e.g. early stop at epoch 0)
+            "avg_train_time":   float(np.mean(fold_train_times)) if fold_train_times else 0.0,
+            "avg_val_time":     float(np.mean(fold_val_times))   if fold_val_times   else 0.0,
+        }
+
+    # ── Save ONE final model: best epoch of best fold ─────────────────────────
+    if global_best_model_state is not None:
+        # Include task in filename so classification and regression models coexist
+        global_model_path = os.path.join(save_path, f"best_model_{data_name}_{args.task}.pt")
+        torch.save({
+            'state_dict':    global_best_model_state,
+            'best_fold':     global_best_fold,
+            'best_val_loss': global_best_val_loss,
+            'dataset':       data_name,
+            'task':          args.task,
+            'top_k':         args.top_k,
+        }, global_model_path)
+        print(f"\n✓ Global best model saved — fold={global_best_fold}  "
+              f"val_loss={global_best_val_loss:.4f}")
+        print(f"  Path: {global_model_path}")
+
+    # ── Save cross-fold summary (all test metrics) for graph plotting ──────────
+    summary_rows = []
+    for fold_key, fold_data in best_results.items():
+        row = {'fold': fold_key, 'best_val_loss': fold_data['best_val_loss']}
+        row.update({f'test_{k}': v for k, v in fold_data['test_metrics'].items()})
+        row.update({f'val_{k}':  v for k, v in (fold_data['best_val_metrics'] or {}).items()})
+        summary_rows.append(row)
+    summary_df = pd.DataFrame(summary_rows)
+
+    # Compute cross-fold mean ± std for all numeric columns and append as summary rows
+    numeric_cols = summary_df.select_dtypes(include=[np.number]).columns.tolist()
+    if len(summary_rows) > 1 and numeric_cols:
+        mean_row = {'fold': 'mean'}
+        std_row  = {'fold': 'std'}
+        mean_row.update({c: summary_df[c].mean() for c in numeric_cols})
+        std_row.update( {c: summary_df[c].std()  for c in numeric_cols})
+        summary_df = pd.concat([summary_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+
+    summary_csv = os.path.join(results_path, 'fold_summary.csv')
+    summary_df.to_csv(summary_csv, index=False)
+    print(f"✓ Fold summary (with mean±std) saved → {summary_csv}")
+
+    # Log results locally
+    log_file = os.path.join(os.getcwd(), 'experiment_results.json')
+    log_entry = {
+        'timestamp': time.ctime(),
+        'dataset': data_name,
+        'task': args.task,
+        'top_k': args.top_k,
+        'fold_results': best_results,
+        'total_time': time.time() - start_all
+    }
+    
+    entries = []
+    if os.path.exists(log_file):
+        with open(log_file, 'r') as f:
+            try:
+                entries = json.load(f)
+            except json.JSONDecodeError:
+                # FIX 10: Only swallow malformed JSON, not OS/permission errors
+                print(f"[Warning] Could not parse {log_file}; starting fresh log.")
+                entries = []
+    entries.append(log_entry)
+    with open(log_file, 'w') as f:
+        json.dump(entries, f, indent=4)
+
+    total_duration = time.time() - start_all
+    print(f"\nAll experiments done in {total_duration:.2f}s.")
 
 if __name__ == '__main__':
     main()

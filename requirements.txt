@@ -9,5 +9,4 @@ rdkit
 tqdm
 bidict
 prefetch-generator
-wandb
 ogb

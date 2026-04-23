@@ -1,0 +1,415 @@
+[
+    {
+        "timestamp": "Wed Apr 22 11:43:18 2026",
+        "dataset": "kinome",
+        "task": "classification",
+        "top_k": 2,
+        "best_fold": 0,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 0.5625,
+                    "Pre": 0.5625,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.39682539682539686,
+                    "BA": 0.5
+                },
+                "best_val_loss": 0.8503068089485168,
+                "avg_train_time": 172.4387005964915,
+                "avg_val_time": 34.13628315925598
+            }
+        },
+        "final_test_metrics": {
+            "Acc": 0.75,
+            "Pre": 0.75,
+            "Rec": 1.0,
+            "Spe": 0.0,
+            "AUC": 0.5466666666666667,
+            "BA": 0.5
+        },
+        "total_time": 868.3320415019989
+    },
+    {
+        "timestamp": "Wed Apr 22 12:22:57 2026",
+        "dataset": "human",
+        "task": "classification",
+        "top_k": 2,
+        "best_fold": 0,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 0.625,
+                    "Pre": 0.5454545454545454,
+                    "Rec": 0.8571428571428571,
+                    "Spe": 0.4444444444444444,
+                    "AUC": 0.7142857142857142,
+                    "BA": 0.6507936507936507
+                },
+                "best_val_loss": 0.7991008758544922,
+                "avg_train_time": 347.12773299217224,
+                "avg_val_time": 98.87155667940776
+            }
+        },
+        "final_test_metrics": {
+            "Acc": 0.45,
+            "Pre": 0.4,
+            "Rec": 0.4444444444444444,
+            "Spe": 0.45454545454545453,
+            "AUC": 0.5454545454545454,
+            "BA": 0.4494949494949495
+        },
+        "total_time": 1763.7639791965485
+    },
+    {
+        "timestamp": "Wed Apr 22 14:34:38 2026",
+        "dataset": "kinome",
+        "task": "regression",
+        "top_k": 2,
+        "best_fold": 0,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "MSE": 8.836003175024459,
+                    "RMSE": 2.9725415346172137,
+                    "pearson": -0.13926549675923658,
+                    "spearman": -0.1764705882352941,
+                    "CI": 0.43333333333333335
+                },
+                "best_val_loss": 9.023147583007812,
+                "avg_train_time": 181.60531648000082,
+                "avg_val_time": 30.334429343541462
+            }
+        },
+        "final_test_metrics": {
+            "MSE": 5.993850330075946,
+            "RMSE": 2.448234124849163,
+            "pearson": 0.16453349970183329,
+            "spearman": 0.1609022556390977,
+            "CI": 0.5578947368421052
+        },
+        "total_time": 841.1754043102264
+    },
+    {
+        "timestamp": "Wed Apr 22 15:56:17 2026",
+        "dataset": "kinome",
+        "task": "classification",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 0.875,
+                    "Pre": 0.875,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.7142857142857143,
+                    "BA": 0.5
+                },
+                "best_val_loss": 0.7146431803703308,
+                "test_metrics": {
+                    "Acc": 0.65,
+                    "Pre": 0.65,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.8131868131868131,
+                    "BA": 0.5
+                },
+                "avg_train_time": 232.90428868929544,
+                "avg_val_time": 5.295943021774292
+            }
+        },
+        "total_time": 965.558634519577
+    },
+    {
+        "timestamp": "Wed Apr 22 16:26:43 2026",
+        "dataset": "kinome",
+        "task": "classification",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 0.875,
+                    "Pre": 0.875,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.7142857142857143,
+                    "BA": 0.5
+                },
+                "best_val_loss": 0.7146431803703308,
+                "test_metrics": {
+                    "Acc": 0.65,
+                    "Pre": 0.65,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.8131868131868131,
+                    "BA": 0.5
+                },
+                "avg_train_time": 410.53727555274963,
+                "avg_val_time": 5.293913205464681
+            }
+        },
+        "total_time": 1503.0405321121216
+    },
+    {
+        "timestamp": "Wed Apr 22 22:20:05 2026",
+        "dataset": "kinome",
+        "task": "classification",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 0.875,
+                    "Pre": 0.875,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.7142857142857143,
+                    "BA": 0.5
+                },
+                "best_val_loss": 0.7146431803703308,
+                "test_metrics": {
+                    "Acc": 0.65,
+                    "Pre": 0.65,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.8131868131868131,
+                    "BA": 0.5
+                },
+                "avg_train_time": 682.0501000086466,
+                "avg_val_time": 16.321340719858807
+            }
+        },
+        "total_time": 2455.357954978943
+    },
+    {
+        "timestamp": "Thu Apr 23 11:28:54 2026",
+        "dataset": "davis",
+        "task": "classification",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 1.0,
+                    "Pre": 0.0,
+                    "Rec": 0.0,
+                    "Spe": 1.0,
+                    "AUC": NaN,
+                    "BA": 1.0
+                },
+                "best_val_loss": 0.24654820561408997,
+                "test_metrics": {
+                    "Acc": 0.9,
+                    "Pre": 0.0,
+                    "Rec": 0.0,
+                    "Spe": 1.0,
+                    "AUC": 0.5555555555555556,
+                    "BA": 0.5
+                },
+                "avg_train_time": 170.21008253097534,
+                "avg_val_time": 8.529006878534952
+            }
+        },
+        "total_time": 667.4274740219116
+    },
+    {
+        "timestamp": "Thu Apr 23 11:42:47 2026",
+        "dataset": "davis",
+        "task": "regression",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "MSE": 73878804.34923607,
+                    "RMSE": 8595.278026290718,
+                    "pearson": -0.4873677108463932,
+                    "spearman": -0.43643578047198484,
+                    "CI": 0.23076923076923078
+                },
+                "best_val_loss": 73878808.0,
+                "test_metrics": {
+                    "MSE": 57857275.6343372,
+                    "RMSE": 7606.397020556921,
+                    "pearson": -0.08806123473810033,
+                    "spearman": -0.017821457732656955,
+                    "CI": 0.5
+                },
+                "avg_train_time": 152.66716448465982,
+                "avg_val_time": 7.3052659034729
+            }
+        },
+        "total_time": 588.660213470459
+    },
+    {
+        "timestamp": "Thu Apr 23 11:59:57 2026",
+        "dataset": "davis",
+        "task": "regression",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "MSE": 0.7657130225493631,
+                    "RMSE": 0.8750502971540339,
+                    "pearson": -0.38584149054790495,
+                    "spearman": -0.3273268353539886,
+                    "CI": 0.3076923076923077
+                },
+                "best_val_loss": 0.9739356637001038,
+                "test_metrics": {
+                    "MSE": 1.1901074161170642,
+                    "RMSE": 1.0909204444491194,
+                    "pearson": -0.06537488978401103,
+                    "spearman": -0.15445263368302695,
+                    "CI": 0.4274193548387097
+                },
+                "avg_train_time": 188.32150928179422,
+                "avg_val_time": 8.897526105244955
+            }
+        },
+        "total_time": 702.9776782989502
+    },
+    {
+        "timestamp": "Thu Apr 23 12:27:38 2026",
+        "dataset": "kiba",
+        "task": "regression",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "MSE": 0.28174722426729204,
+                    "RMSE": 0.5307986664143873,
+                    "pearson": -0.22082376025494171,
+                    "spearman": -0.13173888881045848,
+                    "CI": 0.48148148148148145
+                },
+                "best_val_loss": 0.5187819004058838,
+                "test_metrics": {
+                    "MSE": 0.27840697003399556,
+                    "RMSE": 0.5276428432509964,
+                    "pearson": 0.09696112313043342,
+                    "spearman": 0.09128683312566684,
+                    "CI": 0.532967032967033
+                },
+                "avg_train_time": 107.72862219810486,
+                "avg_val_time": 5.24271297454834
+            }
+        },
+        "total_time": 526.9211900234222
+    },
+    {
+        "timestamp": "Thu Apr 23 12:41:11 2026",
+        "dataset": "kiba",
+        "task": "classification",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 0.75,
+                    "Pre": 0.7142857142857143,
+                    "Rec": 1.0,
+                    "Spe": 0.3333333333333333,
+                    "AUC": 0.5333333333333334,
+                    "BA": 0.6666666666666666
+                },
+                "best_val_loss": 0.8064731359481812,
+                "test_metrics": {
+                    "Acc": 0.6,
+                    "Pre": 0.75,
+                    "Rec": 0.75,
+                    "Spe": 0.0,
+                    "AUC": 0.359375,
+                    "BA": 0.375
+                },
+                "avg_train_time": 172.88374455769858,
+                "avg_val_time": 12.852994521458944
+            }
+        },
+        "total_time": 770.8200075626373
+    },
+    {
+        "timestamp": "Thu Apr 23 13:49:47 2026",
+        "dataset": "kinome",
+        "task": "classification",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 0.875,
+                    "Pre": 0.875,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.8571428571428571,
+                    "BA": 0.5
+                },
+                "best_val_loss": 0.5809137225151062,
+                "test_metrics": {
+                    "Acc": 0.6,
+                    "Pre": 0.631578947368421,
+                    "Rec": 0.9230769230769231,
+                    "Spe": 0.0,
+                    "AUC": 0.4175824175824176,
+                    "BA": 0.46153846153846156
+                },
+                "avg_train_time": 144.70339353879294,
+                "avg_val_time": 3.3092660903930664
+            }
+        },
+        "total_time": 651.1313853263855
+    },
+    {
+        "timestamp": "Thu Apr 23 14:10:44 2026",
+        "dataset": "kinome",
+        "task": "classification",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "Acc": 0.875,
+                    "Pre": 0.875,
+                    "Rec": 1.0,
+                    "Spe": 0.0,
+                    "AUC": 0.8571428571428571,
+                    "BA": 0.5
+                },
+                "best_val_loss": 0.5809137225151062,
+                "test_metrics": {
+                    "Acc": 0.6,
+                    "Pre": 0.631578947368421,
+                    "Rec": 0.9230769230769231,
+                    "Spe": 0.0,
+                    "AUC": 0.4175824175824176,
+                    "BA": 0.46153846153846156
+                },
+                "avg_train_time": 143.60292490323386,
+                "avg_val_time": 3.228612502415975
+            }
+        },
+        "total_time": 653.2128503322601
+    },
+    {
+        "timestamp": "Thu Apr 23 14:32:27 2026",
+        "dataset": "kinome",
+        "task": "regression",
+        "top_k": 2,
+        "fold_results": {
+            "fold_0": {
+                "best_val_metrics": {
+                    "MSE": 19.078373826961517,
+                    "RMSE": 4.367879786230559,
+                    "pearson": -0.5259518829320483,
+                    "spearman": -0.5952380952380953,
+                    "CI": 0.2857142857142857
+                },
+                "best_val_loss": 19.279367446899414,
+                "test_metrics": {
+                    "MSE": 17.72257478471509,
+                    "RMSE": 4.209818854145044,
+                    "pearson": 0.020862911478833773,
+                    "spearman": -0.012030075187969924,
+                    "CI": 0.5
+                },
+                "avg_train_time": 204.14976374308267,
+                "avg_val_time": 3.2319788138071694
+            }
+        },
+        "total_time": 834.79802775383
+    }
+]

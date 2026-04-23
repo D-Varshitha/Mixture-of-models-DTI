@@ -20,7 +20,7 @@ class DeepPurpose(nn.Module):
     self.com_Wo = nn.Linear(39 + 256, 256)
     self.com_net_depth = 3
 
-    self.pro_cnn = nn.ModuleList([nn.Conv1d(in_ch[i], in_ch[i+1], kernel[i]) for i in range(len(in_ch)-1)]).double()
+    self.pro_cnn = nn.ModuleList([nn.Conv1d(in_ch[i], in_ch[i+1], kernel[i]) for i in range(len(in_ch)-1)])
     self.pro_fc = nn.Linear(96, 256)
     
     self.predictor = nn.ModuleList([nn.Linear(dims[i], dims[i+1]) for i in range(len(dims)-1)])  # layersize=4
@@ -81,12 +81,12 @@ class DeepPurpose(nn.Module):
 
 
   def cnn(self, p):
-    p = p.double()
+    # float32 throughout — .double() removed (was unnecessary, doubled GPU memory)
     for l in self.pro_cnn:
       p = F.relu(l(p))
     p = F.adaptive_max_pool1d(p, output_size=1)
     p = p.view(p.size(0), -1)
-    p = self.pro_fc(p.float())
+    p = self.pro_fc(p)
     return p
 
   def forward(self, com, pro):

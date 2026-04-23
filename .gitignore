@@ -1,13 +1,28 @@
+# Virtual environments
 .venv/
+venv/
 venv39/
-dataset/
+env/
+
+# Python cache / compiled
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Logs
 *.log
+
+# OS / editor
 .DS_Store
 .vscode/
-dataset/
 
-wandb/
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Project-specific
+dataset/
+results/
+saved_models/
