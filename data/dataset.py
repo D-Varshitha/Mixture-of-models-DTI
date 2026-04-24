@@ -171,11 +171,14 @@ class CPIDataset(InMemoryDataset):
         elif cf == 'mpnn':
             self.generate_mpnn_feature(MAX_SMI_LEN)
 
-    def generate_mpnn_feature(self, MAX_SMI_LEN):
+    def generate_mpnn_feature(self, MAX_SMI_LEN=100):
         mpnn = []
+        graphs = []
+        max_atoms = 0
+        max_bonds = 0
+
+        # Pass 1: Parse all SMILES and find the global maximum dimensions
         for com, smi in self.lig_dic.items():
-            # FIX 2 (strict dataset usage): NO fallback to dummy/zero tensors.
-            # If any molecule fails to featurize, crash so the dataset can be fixed.
             padding = torch.zeros(ATOM_FDIM + BOND_FDIM)
             fatoms, fbonds = [], [padding]
             in_bonds, all_bonds = [], [(-1, -1)]
@@ -208,6 +211,11 @@ class CPIDataset(InMemoryDataset):
                 in_bonds[x].append(b)
 
             total_bonds = len(all_bonds)
+            
+            # Update global max dimensions
+            max_atoms = max(max_atoms, n_atoms)
+            max_bonds = max(max_bonds, total_bonds)
+            
             fatoms = torch.stack(fatoms, 0)
             fbonds = torch.stack(fbonds, 0)
             agraph = torch.zeros(n_atoms, 6).long()  # 6 is the max number of bond
@@ -221,14 +229,13 @@ class CPIDataset(InMemoryDataset):
                 for i, b2 in enumerate(in_bonds[x]):
                     if all_bonds[b2][0] != y:
                         bgraph[b1, i] = b2
-            Natom, Nbond = fatoms.shape[0], fbonds.shape[0]
+                        
+            graphs.append((fatoms, fbonds, agraph, bgraph, n_atoms, total_bonds))
 
-            atoms_completion_num = MAX_SMI_LEN - fatoms.shape[0]  # MAX_ATOM = 100
-            bonds_completion_num = MAX_SMI_LEN*2 - fbonds.shape[0] # MAX_BOND = 200
-            try:
-                assert atoms_completion_num >= 0 and bonds_completion_num >= 0
-            except:
-                raise Exception(f"{atoms_completion_num}/{bonds_completion_num} / Please increasing MAX_ATOM in line 26 utils.py, for example, MAX_ATOM=600 and reinstall it via 'python setup.py install'. The current setting is for small molecule. ")
+        # Pass 2: Pad using the true maximum dimensions
+        for fatoms, fbonds, agraph, bgraph, Natom, Nbond in graphs:
+            atoms_completion_num = max_atoms - fatoms.shape[0]
+            bonds_completion_num = max_bonds - fbonds.shape[0]
 
             fatoms_dim = fatoms.shape[1]
             fbonds_dim = fbonds.shape[1]
@@ -238,8 +245,8 @@ class CPIDataset(InMemoryDataset):
             bgraph = torch.cat([bgraph.float(), torch.zeros(bonds_completion_num, 6)], 0)
             shape_tensor = torch.Tensor([Natom, Nbond]).view(1,-1)
             mpnn.append([fatoms.float(), fbonds.float(), agraph.float(), bgraph.float(), shape_tensor.float()])
+            
         mpnn = np.array([[t.numpy() for t in row] for row in mpnn], dtype=object)
-        # print(f'Generate MPNN feature with size of {mpnn.shape}')
         np.save(f'{self.com_feat_dir}/dp_mpnn.npy', mpnn)
         return
 

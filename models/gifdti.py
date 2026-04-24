@@ -306,7 +306,7 @@ class CNNFormerDTI(nn.Module):
         self.protein_embed = nn.Embedding(protein_dict['embeding_num'], drug_dict['embeding_dim'], padding_idx=0)
         self.drug_embed = nn.Embedding(drug_dict['embeding_num'], protein_dict['embeding_dim'], padding_idx=0)
         self.protein_F = CNNformerEncoder(
-            max_len = 1000,
+            max_len = protein_dict['max_len'],
             encoder_dim=256,
             num_layers=3,
             num_attention_heads=8,
@@ -316,7 +316,7 @@ class CNNFormerDTI(nn.Module):
             conv_dropout_p=0.1,
             conv_kernel_size=5)
         self.drug_F = CNNformerEncoder(
-            max_len = 100,
+            max_len = drug_dict['max_len'],
             encoder_dim=256,
             num_layers=3,
             num_attention_heads=8,

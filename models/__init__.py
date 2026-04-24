@@ -50,7 +50,7 @@ def build_model(name, task, com_len=100, pro_len=1000):
         # FIX 3: atom_dim=5, bond_dim=3 matches moe_dataset.py's inline RDKit graph
         # extraction: atoms=[AtomicNum,Degree,FormalCharge,NumExplicitHs,IsAromatic]
         # bonds=[BondTypeAsDouble, IsInRing, IsConjugated]  → cat dim = 5+3 = 8 ≠ 86
-        return _replace_batchnorm(PerceiverCPI(atom_dim=5, bond_dim=3, output_dim=1, task=task))
+        return _replace_batchnorm(PerceiverCPI(atom_dim=5, bond_dim=3, prot_seq_len=pro_len, output_dim=1, task=task))
     elif name == 'smtdta':
         pass
 

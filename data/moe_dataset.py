@@ -172,10 +172,10 @@ class MoEDataset(CPIDataset):
         batch_dict['dp_bg']  = torch.tensor(mpnn_val[3], dtype=torch.float32)
         batch_dict['dp_abn'] = torch.tensor(mpnn_val[4], dtype=torch.float32)
         
-        # DeepPurpose CNN encoder expects [26, 1000] one-hot (row=AA index, col=position)
+        # DeepPurpose CNN encoder expects [26, MAX_SEQ_LEN] one-hot (row=AA index, col=position)
         # Row 0 = padding (never set); rows 1-25 = amino acids from CHARPROTSET
-        dp_pro_tensor = torch.zeros(26, 1000, dtype=torch.float32)
-        for i, val in enumerate(seq_enc_std[:1000]):
+        dp_pro_tensor = torch.zeros(26, self.MAX_SEQ_LEN, dtype=torch.float32)
+        for i, val in enumerate(seq_enc_std[:self.MAX_SEQ_LEN]):
             if val > 0:  # skip val=0 (padding/unknown) to keep row-0 all-zero
                 dp_pro_tensor[val, i] = 1.0
         batch_dict['dp_pro'] = dp_pro_tensor
@@ -184,7 +184,7 @@ class MoEDataset(CPIDataset):
 
     def _get_rdkit_graph(self, smi):
         """Helper to generate internal graph for PerceiverCPI/MPNN."""
-        max_a = 100
+        max_a = self.MAX_SMI_LEN
         pad_atoms = np.zeros((max_a, 5), dtype=np.float32)
         pad_bonds = np.zeros((max_a, max_a, 3), dtype=np.float32)
         pad_adj = np.zeros((max_a, max_a), dtype=np.float32)
