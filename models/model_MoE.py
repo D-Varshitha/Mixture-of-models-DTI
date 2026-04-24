@@ -356,13 +356,13 @@ class DTI_Sparse_MoE(nn.Module):
         # Prints the Drug-Protein IDs and the 2 experts they selected so you
         # can track specific samples across different epochs!
         # =====================================================================
-        expert_names = [[self.expert_keys[idx] for idx in sample_indices] for sample_indices in top_k_indices.tolist()]
+        # expert_names = [[self.expert_keys[idx] for idx in sample_indices] for sample_indices in top_k_indices.tolist()]
         
-        print("\n--- Batch Routing Sample Check ---")
-        for i in range(B):
-            drug = batch['com_id'][i]
-            prot = batch['pro_id'][i]
-            print(f"Sample: {drug[:10]}... & {prot[:10]}...  -->  Selected: {expert_names[i]}")
+        # print("\n--- Batch Routing Sample Check ---")
+        # for i in range(B):
+        #     drug = batch['com_id'][i]
+        #     prot = batch['pro_id'][i]
+        #     print(f"Sample: {drug[:10]}... & {prot[:10]}...  -->  Selected: {expert_names[i]}")
 
         # ---- 2. Expert dispatch ---------------------------------------
         # Collect weighted scalar per expert slot: [B, num_experts]

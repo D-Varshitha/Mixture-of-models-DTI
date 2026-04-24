@@ -41,6 +41,8 @@ class MoEDataset(CPIDataset):
             device='cuda' if torch.cuda.is_available() and args.device != 'cpu' else 'cpu',
             protein_chunk_len=args.protein_chunk_len,
             protein_chunk_stride=args.protein_chunk_stride,
+            drug_chunk_len=args.drug_chunk_len,
+            drug_chunk_stride=args.drug_chunk_stride,
         )
         self._drug_emb_cache = {}
         self._prot_emb_cache = {}

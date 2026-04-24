@@ -24,6 +24,8 @@ class PretrainedEmbeddingGenerator:
         device: str = None,
         protein_chunk_len: int = 1022,
         protein_chunk_stride: int = 512,
+        drug_chunk_len: int = 510,
+        drug_chunk_stride: int = 255,
     ):
         self.esm_model_name = esm_model_name
         self.chembert_model_name = chembert_model_name
@@ -31,6 +33,9 @@ class PretrainedEmbeddingGenerator:
         self.device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
         self.protein_chunk_len = protein_chunk_len
         self.protein_chunk_stride = protein_chunk_stride
+        # ChemBERT max_position_embeddings=512; 2 slots used by [CLS]+[EOS] → 510 real tokens
+        self.drug_chunk_len = drug_chunk_len    # max content tokens per chunk
+        self.drug_chunk_stride = drug_chunk_stride  # sliding stride
 
         self._esm_tokenizer = None
         self._esm_model = None
@@ -76,29 +81,101 @@ class PretrainedEmbeddingGenerator:
         return int(self._chem_model.config.hidden_size)
 
     def embed_drug(self, smiles: str) -> torch.Tensor:
-        self._load_chembert()
-        inputs = self._chem_tokenizer(
-            smiles,
-            return_tensors="pt",
-            add_special_tokens=True,
-            return_special_tokens_mask=True,
-            truncation=False,
-        )
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = self._chem_model(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-            )
+        """
+        Generates token-level ChemBERT embeddings with sliding-window chunking.
 
-        token_embs = outputs.last_hidden_state.squeeze(0)
-        special_mask = inputs["special_tokens_mask"].squeeze(0).bool()
-        attn_mask = inputs["attention_mask"].squeeze(0).bool()
-        keep = attn_mask & (~special_mask)
-        token_embs = token_embs[keep]
-        if token_embs.ndim != 2 or token_embs.size(0) == 0:
-            raise RuntimeError(f"ChemBERT returned invalid token embeddings for SMILES {smiles!r}")
-        return token_embs.cpu()
+        SMILES must be chunked at TOKEN level (not character level) because
+        multi-char tokens like Cl, Br, [NH], @@ are single tokens —
+        character slicing would corrupt them.
+
+        Strategy:
+          1. Tokenize full SMILES *without* special tokens → raw token IDs.
+          2. If total tokens <= drug_chunk_len  →  fast single-pass (common case).
+          3. Otherwise slide a window of size drug_chunk_len with stride drug_chunk_stride
+             over the token IDs, prepend/append [CLS]/[EOS] manually, run the model,
+             strip specials, and overlap-average each token position.
+        Returns:
+            [num_tokens, hidden_size]  float32 on CPU
+        """
+        self._load_chembert()
+        if not smiles:
+            raise RuntimeError("Cannot embed empty SMILES string with ChemBERT.")
+
+        # ── Step 1: tokenize without special tokens to get raw IDs ──────────
+        raw = self._chem_tokenizer(
+            smiles,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )
+        all_ids = raw["input_ids"][0]          # [L_tokens]
+        total_tokens = all_ids.size(0)
+
+        chunk_len = max(1, self.drug_chunk_len)
+        stride    = max(1, min(self.drug_chunk_stride, chunk_len))
+
+        cls_id = self._chem_tokenizer.cls_token_id
+        eos_id = (self._chem_tokenizer.eos_token_id
+                  or self._chem_tokenizer.sep_token_id)
+
+        # ── Step 2: fast path — fits in one chunk ────────────────────────────
+        if total_tokens <= chunk_len:
+            chunk_with_sp = torch.cat([
+                torch.tensor([cls_id], dtype=torch.long),
+                all_ids,
+                torch.tensor([eos_id], dtype=torch.long),
+            ]).unsqueeze(0).to(self.device)           # [1, L+2]
+            attn = torch.ones_like(chunk_with_sp)
+            with torch.no_grad():
+                out = self._chem_model(input_ids=chunk_with_sp,
+                                       attention_mask=attn)
+            token_embs = out.last_hidden_state.squeeze(0)[1:-1]  # strip [CLS],[EOS]
+            if token_embs.size(0) == 0:
+                raise RuntimeError(
+                    f"ChemBERT returned zero token embeddings for SMILES {smiles!r}")
+            return token_embs.cpu()
+
+        # ── Step 3: sliding-window path (long SMILES) ────────────────────────
+        hidden_size = self.chembert_hidden_size          # only needed here
+        full_embed = torch.zeros(total_tokens, hidden_size, device=self.device)
+        counts     = torch.zeros(total_tokens,              device=self.device)
+
+        for start in range(0, total_tokens, stride):
+            end        = min(start + chunk_len, total_tokens)
+            chunk_ids  = all_ids[start:end]
+
+            chunk_with_sp = torch.cat([
+                torch.tensor([cls_id], dtype=torch.long),
+                chunk_ids,
+                torch.tensor([eos_id], dtype=torch.long),
+            ]).unsqueeze(0).to(self.device)           # [1, chunk_len+2]
+            attn = torch.ones_like(chunk_with_sp)
+
+            with torch.no_grad():
+                out = self._chem_model(input_ids=chunk_with_sp,
+                                       attention_mask=attn)
+
+            # Strip [CLS] (pos 0) and [EOS] (pos -1)
+            token_embs  = out.last_hidden_state.squeeze(0)[1:-1]  # [chunk_len, H]
+            chunk_tokens = token_embs.size(0)
+            if chunk_tokens == 0:
+                raise RuntimeError(
+                    f"ChemBERT returned zero embeddings for SMILES chunk "
+                    f"starting at token {start}: {smiles!r}")
+
+            full_embed[start:start + chunk_tokens] += token_embs
+            counts    [start:start + chunk_tokens] += 1
+
+            if end == total_tokens:
+                break
+
+        if (counts == 0).any():
+            missing = int((counts == 0).sum().item())
+            raise RuntimeError(
+                f"Drug overlap embedding left {missing} token positions uncovered "
+                f"for SMILES: {smiles!r}")
+
+        return (full_embed / counts.unsqueeze(1)).cpu()
+
 
     def embed_protein(self, seq: str) -> torch.Tensor:
         self._load_esm()
@@ -188,6 +265,8 @@ class PretrainedEmbeddingGenerator:
             "num_proteins": len(prot_paths),
             "protein_chunk_len": self.protein_chunk_len,
             "protein_chunk_stride": self.protein_chunk_stride,
+            "drug_chunk_len": self.drug_chunk_len,
+            "drug_chunk_stride": self.drug_chunk_stride,
         }
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
