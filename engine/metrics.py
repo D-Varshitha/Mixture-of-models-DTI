@@ -90,6 +90,27 @@ def calculate_performance_regression(df, args):
     ci_       = ci(label, pred)
     return [mse_, rmse_, pearson_, spearman_, ci_]
 
+def calculate_icp_selective_metrics(df, args, threshold):
+    """
+    Matches reference logic:
+    1. Filter for samples where ICP Confidence > threshold.
+    2. Calculate Accuracy on that subset.
+    """
+    # 'predByICP' is the label, 'confICP' is the p-value
+    sub_df = df[df['confICP'] > threshold]
+    
+    total_samples = len(df)
+    sub_count = len(sub_df)
+    
+    if sub_count == 0:
+        return [0.0, 0.0, 0] # Accuracy, Selection Rate, Count
+    
+    correct = (sub_df['predByICP'] == sub_df[args.label]).sum()
+    accuracy = correct / sub_count
+    selection_rate = sub_count / total_samples
+    
+    return [accuracy, selection_rate, sub_count]
+
 def calculate_icp_metrics_regression(df, args, threshold):
     """
     Calculates Coverage and Average Interval Width for ICP.

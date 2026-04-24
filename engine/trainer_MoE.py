@@ -154,9 +154,11 @@ def train_moe(train_loader, model, loss_fn, optimizer, args, valid_loader=None):
     return model, best_val_metrics, best_val_loss, train_times, val_times, epoch_history
 
 
-def test_moe(loader, model, loss_fn, args, split='Test'):
+def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
+    from engine.conformal import apply_icp_reference_logic
     model.eval()
     preds, labels, com_ids, pro_ids = [], [], [], []
+    icp_preds, icp_confs = [], []
     total_loss      = 0.0
     total_main_loss = 0.0
     total_aux_loss  = 0.0
@@ -173,7 +175,13 @@ def test_moe(loader, model, loss_fn, args, split='Test'):
             total_aux_loss  += aux_loss.item()
 
             if args.task == 'classification':
-                preds.extend(torch.sigmoid(output).cpu().numpy().tolist())
+                probs = torch.sigmoid(output).cpu().numpy().tolist()
+                preds.extend(probs)
+                if cal_scores is not None:
+                    # Apply reference ICP logic (Selective Prediction)
+                    icp_res = apply_icp_reference_logic(output, cal_scores, args.task)
+                    icp_preds.extend([res[0] for res in icp_res])
+                    icp_confs.extend([res[1] for res in icp_res])
             else:
                 preds.extend(output.cpu().numpy().tolist())
 
@@ -181,12 +189,17 @@ def test_moe(loader, model, loss_fn, args, split='Test'):
             com_ids.extend(batch['com_id'])
             pro_ids.extend(batch['pro_id'])
 
-    result_df = pd.DataFrame({
+    res_dict = {
         'com_id':    com_ids,
         'pro_id':    pro_ids,
         'pred':      preds,
         args.label:  labels
-    })
+    }
+    if cal_scores is not None:
+        res_dict['predByICP'] = icp_preds
+        res_dict['confICP']   = icp_confs
+
+    result_df = pd.DataFrame(res_dict)
 
     metrics  = calculate_performance(result_df, args)
     avg_loss = total_loss / len(loader)

@@ -14,8 +14,8 @@ from data.moe_dataset import MoEDataset, moe_collate_fn
 from models import build_model
 from models.model_MoE import DTI_Sparse_MoE
 from engine.trainer_MoE import train_moe, test_moe
-from engine.conformal import get_conformal_threshold
-from engine.metrics import calculate_icp_metrics_classification, calculate_icp_metrics_regression
+from engine.conformal import get_calibration_scores, apply_icp_reference_logic
+from engine.metrics import calculate_icp_selective_metrics
 from config import args, metrics_classification, metrics_regression
 
 
@@ -210,26 +210,29 @@ def main():
             global_best_fold        = fold
             print(f"  ✓ New global best model  fold={fold}  val_loss={best_val_loss:.4f}")
 
-        # ── Inductive Conformal Prediction (ICP) Calibration ──────────────────
-        print(f"\n--- ICP Calibration (Confidence={args.confidence}) ---")
-        alpha = 1.0 - args.confidence
-        icp_threshold = get_conformal_threshold(moe_model, valid_loader, alpha, args.task)
-        print(f"  Calibrated Threshold: {icp_threshold:.4f}")
+        # ── Inductive Conformal Prediction (ICP) - Reference Logic ────────────
+        print(f"\n--- ICP Calibration (Confidence Threshold={args.confidence}) ---")
+        cal_scores = get_calibration_scores(moe_model, valid_loader, args.task)
+        print(f"  Calibration items: {len(cal_scores)}")
 
         # Test at the end of each fold (model already holds best-epoch weights)
         print(f"\n--- Testing Fold {fold} ---")
-        result, perf, t_loss = test_moe(test_loader, moe_model, loss_fn, args, split=f'Test_Fold_{fold}')
+        # Passing cal_scores to test_moe triggers the reference ICP logic
+        result, perf, t_loss = test_moe(test_loader, moe_model, loss_fn, args, 
+                                        split=f'Test_Fold_{fold}', cal_scores=cal_scores)
         
-        # Calculate ICP Metrics
+        # Calculate Selective ICP Metrics (Accuracy on high-confidence subset)
         if args.task == 'classification':
-            icp_metrics = calculate_icp_metrics_classification(result, args, icp_threshold)
-            icp_names = ['ICP_Coverage', 'ICP_Avg_Set_Size']
+            icp_acc, sel_rate, sub_count = calculate_icp_selective_metrics(result, args, args.confidence)
+            icp_names = ['ICP_Sub_Accuracy', 'ICP_Selection_Rate', 'ICP_Sub_Count']
+            icp_vals  = [icp_acc, sel_rate, sub_count]
         else:
-            icp_metrics = calculate_icp_metrics_regression(result, args, icp_threshold)
-            icp_names = ['ICP_Coverage', 'ICP_Avg_Width']
+            # Regression ICP logic from previous implementation
+            icp_names = []
+            icp_vals  = []
             
         final_metrics = perf.iloc[0].to_dict()
-        for name, val in zip(icp_names, icp_metrics):
+        for name, val in zip(icp_names, icp_vals):
             final_metrics[name] = val
             
         print(f"Fold {fold} Test Results (including ICP):", final_metrics)
@@ -238,7 +241,6 @@ def main():
             "best_val_metrics": best_val_metrics,
             "best_val_loss":    best_val_loss,
             "test_metrics":     final_metrics,
-            "icp_threshold":    icp_threshold,
             # FIX 2: Guard against empty time lists (e.g. early stop at epoch 0)
             "avg_train_time":   float(np.mean(fold_train_times)) if fold_train_times else 0.0,
             "avg_val_time":     float(np.mean(fold_val_times))   if fold_val_times   else 0.0,

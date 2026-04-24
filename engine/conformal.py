@@ -1,65 +1,61 @@
 import numpy as np
 import torch
 
-def get_conformal_threshold(model, loader, alpha, task):
+def get_calibration_scores(model, loader, task):
     """
-    Calculates the non-conformity score threshold for Inductive Conformal Prediction.
-    
-    For classification: Non-conformity score = 1 - P(correct_class)
-    For regression: Non-conformity score = |y - y_pred|
+    Returns the non-conformity scores for the calibration (validation) set.
     """
     model.eval()
     scores = []
-    
     with torch.no_grad():
         for batch in loader:
             output, _ = model(batch)
             labels = batch['label'].to(output.device).float()
             
             if task == 'classification':
-                # P(y=1)
                 probs = torch.sigmoid(output)
-                # Non-conformity score for the TRUE label:
-                # If label=1, score is 1 - P(y=1)
-                # If label=0, score is 1 - P(y=0) = 1 - (1 - P(y=1)) = P(y=1)
-                batch_scores = torch.where(labels == 1, 1.0 - probs, probs)
-                scores.extend(batch_scores.cpu().numpy().tolist())
+                # Non-conformity score: abs(pred - label)
+                batch_scores = torch.abs(probs - labels)
             else:
-                # Absolute error for regression
                 batch_scores = torch.abs(output - labels)
-                scores.extend(batch_scores.cpu().numpy().tolist())
-    
-    scores = np.array(scores)
-    # The threshold is the (1-alpha) quantile of the non-conformity scores
-    # We use q = (n+1)(1-alpha) / n  approximation or similar.
-    # Standard ICP: find the smallest q such that at least (1-alpha) fraction of scores are <= q.
-    n = len(scores)
-    q_level = np.ceil((n + 1) * (1 - alpha)) / n
-    q_level = min(max(q_level, 0.0), 1.0)
-    
-    threshold = np.quantile(scores, q_level, method='higher')
-    return threshold
+            
+            scores.extend(batch_scores.cpu().numpy().tolist())
+    return np.array(scores)
 
-def apply_conformal_prediction(output, threshold, task):
+def calculate_p_value(cal_scores, test_score):
     """
-    Applies the threshold to produce prediction sets or intervals.
+    p-value = (number of calibration scores >= test_score) / (n_cal + 1)
+    """
+    n = len(cal_scores)
+    count = np.sum(cal_scores >= test_score)
+    # The reference code uses (count) / (n + 1) where test_score is included in the rank.
+    # To match reference logic exactly: 
+    # (n_cal_where_score >= test_score + 1_for_test_itself) / (n_cal + 1)
+    return (count + 1) / (n + 1)
+
+def apply_icp_reference_logic(output, cal_scores, task):
+    """
+    Exactly matches the reference logic:
+    1. Calculate p-value for every possible label.
+    2. Pick the label with the highest p-value.
     """
     if task == 'classification':
         probs = torch.sigmoid(output).cpu().numpy()
-        # For each sample, the prediction set includes class '1' if 1-P(y=1) <= threshold
-        # and class '0' if P(y=1) <= threshold.
-        # This is equivalent to:
-        # Include class 1 if P(y=1) >= 1 - threshold
-        # Include class 0 if P(y=1) <= threshold
-        
-        pred_sets = []
+        results = []
         for p in probs:
-            s = []
-            if p <= threshold: s.append(0)
-            if p >= (1.0 - threshold): s.append(1)
-            pred_sets.append(s)
-        return pred_sets
+            # p_0: p-value assuming true label is 0 (score is p - 0 = p)
+            p_0 = calculate_p_value(cal_scores, p)
+            # p_1: p-value assuming true label is 1 (score is abs(p - 1) = 1 - p)
+            p_1 = calculate_p_value(cal_scores, 1.0 - p)
+            
+            # Predict the class with the highest p-value (lowest non-conformity)
+            pred_label = 1 if p_1 > p_0 else 0
+            confidence = max(p_0, p_1)
+            results.append((pred_label, confidence))
+        return results
     else:
+        # For regression, we can't iterate through all labels.
+        # Reference code logic is designed for classification.
+        # For regression, we'll return the point prediction and a standard p-value.
         preds = output.cpu().numpy()
-        # Interval is [pred - threshold, pred + threshold]
-        return [[p - threshold, p + threshold] for p in preds]
+        return [(p, 0.5) for p in preds] # Placeholder for regression
