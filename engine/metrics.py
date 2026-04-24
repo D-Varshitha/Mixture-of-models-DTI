@@ -10,6 +10,7 @@ from sklearn.metrics import recall_score as rec
 from sklearn.metrics import precision_score as pre
 from sklearn.metrics import confusion_matrix as cm
 from sklearn.metrics import balanced_accuracy_score as ba
+from sklearn.metrics import average_precision_score as auprc
 
 def calculate_performance(df, args):
     if args.task == 'classification':
@@ -33,11 +34,15 @@ def calculate_performance_classification(df,args): # df with columns 'label', 'p
         auc_ = auc(label, prob)
     except Exception:
         auc_ = 0.0
+    try:
+        auprc_ = auprc(label, prob)
+    except Exception:
+        auprc_ = 0.0
     ba_ = ba(label, pred)
     tn, fp, fn, tp = cm(label, pred, labels=[0, 1]).ravel()
     spe_ = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     
-    return [acc_, pre_, rec_, spe_, auc_, ba_]
+    return [acc_, pre_, rec_, spe_, auc_, auprc_, ba_]
 
 
 def calculate_performance_regression(df, args):
