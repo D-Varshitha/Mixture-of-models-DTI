@@ -44,6 +44,32 @@ def calculate_performance_classification(df,args): # df with columns 'label', 'p
     
     return [acc_, pre_, rec_, spe_, auc_, auprc_, ba_]
 
+def calculate_icp_metrics_classification(df, args, threshold):
+    """
+    Calculates Validity (Coverage) and Efficiency (Set Size) for ICP.
+    """
+    prob = np.array(df['pred'])
+    label = np.array(df[args.label])
+    
+    # Non-conformity score for class 1: 1 - p
+    # Non-conformity score for class 0: p
+    
+    # Class 0 is in set if prob <= threshold
+    # Class 1 is in set if (1 - prob) <= threshold  => prob >= 1 - threshold
+    
+    in_set_0 = prob <= threshold
+    in_set_1 = prob >= (1.0 - threshold)
+    
+    set_size = in_set_0.astype(int) + in_set_1.astype(int)
+    
+    # Coverage: true label is in the set
+    coverage = np.where(label == 1, in_set_1, in_set_0)
+    
+    avg_coverage = np.mean(coverage)
+    avg_set_size = np.mean(set_size)
+    
+    return [avg_coverage, avg_set_size]
+
 
 def calculate_performance_regression(df, args):
     pred  = np.array(df['pred'])
@@ -63,6 +89,23 @@ def calculate_performance_regression(df, args):
         spearman_ = 0.0
     ci_       = ci(label, pred)
     return [mse_, rmse_, pearson_, spearman_, ci_]
+
+def calculate_icp_metrics_regression(df, args, threshold):
+    """
+    Calculates Coverage and Average Interval Width for ICP.
+    """
+    pred = np.array(df['pred'])
+    label = np.array(df[args.label])
+    
+    # Interval is [pred - threshold, pred + threshold]
+    lower = pred - threshold
+    upper = pred + threshold
+    
+    coverage = (label >= lower) & (label <= upper)
+    avg_coverage = np.mean(coverage)
+    avg_width = 2 * threshold
+    
+    return [avg_coverage, avg_width]
 
 def rmse(y,f):
     rmse = sqrt(((y - f)**2).mean(axis=0))

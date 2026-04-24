@@ -1,7 +1,7 @@
 import argparse
 
 MODELS = ['dcdti', 'dpdta', 'mdprd', 'dp', 'cpi', 'mlp', 'rf', 'svm','perceivercpi', 'smtdta', 'ensdti']
-metrics_classification = ['Acc','Pre','Rec','Spe','AUC','AUPRC','BA']
+metrics_classification = ['Acc','Pre','Rec','Spe','AUC','BA']
 metrics_regression = ['MSE', 'RMSE', 'pearson', 'spearman', 'CI']
 
 
@@ -42,12 +42,11 @@ parser.add_argument('--lambda-aux', default=0.1, type=float, help='weight for au
 parser.add_argument('--seed', default=42, type=int, help='global random seed for reproducible full training')
 parser.add_argument('--top_k', default=2, type=int, choices=[2, 3, 4, 5, 6], help='number of top k experts to select')
 parser.add_argument('--esm-model-name', default='facebook/esm2_t30_150M_UR50D', type=str, help='pretrained ESM model for protein token embeddings')
-parser.add_argument('--chembert-model-name', default='DeepChem/ChemBERTa-77M-MTR', type=str, help='pretrained ChemBERT/ChemBERTa model for SMILES token embeddings')
+parser.add_argument('--chembert-model-name', default='seyonec/ChemBERTa-zinc-base-v1', type=str, help='pretrained ChemBERT/ChemBERTa model for SMILES token embeddings')
 parser.add_argument('--hf-cache-dir', default=None, type=str, help='optional HuggingFace cache dir')
 parser.add_argument('--protein-chunk-len', default=1022, type=int, help='max protein chunk length before adding special tokens')
 parser.add_argument('--protein-chunk-stride', default=512, type=int, help='overlap stride for protein chunk embedding')
-parser.add_argument('--drug-chunk-len', default=510, type=int, help='max SMILES token chunk length for ChemBERT (hard limit 510 = 512 - 2 specials)')
-parser.add_argument('--drug-chunk-stride', default=255, type=int, help='overlap stride for SMILES token chunk embedding')
+parser.add_argument('--confidence', default=0.95, type=float, help='confidence level (1 - alpha) for Inductive Conformal Prediction')
 
 args = parser.parse_args()
 print('ARGUMENT:\n', args) 
