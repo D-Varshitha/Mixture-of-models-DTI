@@ -46,6 +46,8 @@ parser.add_argument('--chembert-model-name', default='seyonec/ChemBERTa-zinc-bas
 parser.add_argument('--hf-cache-dir', default=None, type=str, help='optional HuggingFace cache dir')
 parser.add_argument('--protein-chunk-len', default=1022, type=int, help='max protein chunk length before adding special tokens')
 parser.add_argument('--protein-chunk-stride', default=512, type=int, help='overlap stride for protein chunk embedding')
+parser.add_argument('--drug-chunk-len', default=510, type=int, help='max SMILES token chunk length for ChemBERT (hard limit 510 = 512 - 2 specials)')
+parser.add_argument('--drug-chunk-stride', default=255, type=int, help='overlap stride for SMILES token chunk embedding')
 parser.add_argument('--confidence', default=0.95, type=float, help='confidence level (1 - alpha) for Inductive Conformal Prediction')
 
 args = parser.parse_args()
