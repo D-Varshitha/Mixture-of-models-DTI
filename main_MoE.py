@@ -65,12 +65,12 @@ def _validate_dataset_integrity(dataset):
 def _build_experts_and_model(args, device):
     """FIX 4: Called inside the fold loop to reset model state per fold."""
     experts_dict = {
-        'dpdta':        build_model('dpdta',        args.task),
-        'dcdti':        build_model('dcdti',        args.task),
-        'dp':           build_model('dp',           args.task),
-        'mdprd':        build_model('mdprd',        args.task),
-        'gifdti':       build_model('gifdti',       args.task),
-        'perceivercpi': build_model('perceivercpi', args.task),
+        'dpdta':        build_model('dpdta',        args.task, com_len=args.com_len, pro_len=args.pro_len),
+        'dcdti':        build_model('dcdti',        args.task, com_len=args.com_len, pro_len=args.pro_len),
+        'dp':           build_model('dp',           args.task, com_len=args.com_len, pro_len=args.pro_len),
+        'mdprd':        build_model('mdprd',        args.task, com_len=args.com_len, pro_len=args.pro_len),
+        'gifdti':       build_model('gifdti',       args.task, com_len=args.com_len, pro_len=args.pro_len),
+        'perceivercpi': build_model('perceivercpi', args.task, com_len=args.com_len, pro_len=args.pro_len),
     }
     moe_model = DTI_Sparse_MoE(
         experts_dict, drug_vocab=65, prot_vocab=26, k=args.top_k, lambda_aux=args.lambda_aux

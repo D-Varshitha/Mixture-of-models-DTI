@@ -31,7 +31,7 @@ def _replace_batchnorm(module):
     return module
 
 
-def build_model(name, task, data=None):
+def build_model(name, task, com_len=100, pro_len=1000):
     if name == 'dcdti':
         return _replace_batchnorm(DeepConvDTI(1, task))
     elif name == 'dpdta':
@@ -40,8 +40,8 @@ def build_model(name, task, data=None):
         return _replace_batchnorm(MDeePred(1024, 1, task))
     elif name == 'gifdti':
         from .gifdti import CNNFormerDTI
-        drug_dict = {'max_len': 100, 'encoder_dim': 256, 'embeding_dim': 256, 'embeding_num': 65, 'num_layers': 3, 'conv_kernel_size': 5, 'feed_forward_expansion_factor': 4, 'num_attention_heads': 8, 'attention_dropout_p': 0.1, 'conv_dropout_p': 0.1, 'predict_dropout_prob': 0.1}
-        protein_dict = {'max_len': 1000, 'encoder_dim': 256, 'embeding_dim': 256, 'embeding_num': 26, 'num_layers': 3, 'conv_kernel_size': 5, 'feed_forward_expansion_factor': 4, 'num_attention_heads': 8, 'attention_dropout_p': 0.1, 'conv_dropout_p': 0.1}
+        drug_dict = {'max_len': com_len, 'encoder_dim': 256, 'embeding_dim': 256, 'embeding_num': 65, 'num_layers': 3, 'conv_kernel_size': 5, 'feed_forward_expansion_factor': 4, 'num_attention_heads': 8, 'attention_dropout_p': 0.1, 'conv_dropout_p': 0.1, 'predict_dropout_prob': 0.1}
+        protein_dict = {'max_len': pro_len, 'encoder_dim': 256, 'embeding_dim': 256, 'embeding_num': 26, 'num_layers': 3, 'conv_kernel_size': 5, 'feed_forward_expansion_factor': 4, 'num_attention_heads': 8, 'attention_dropout_p': 0.1, 'conv_dropout_p': 0.1}
         return _replace_batchnorm(CNNFormerDTI(drug_dict, protein_dict))
     elif name == 'dp':
         return _replace_batchnorm(DeepPurpose([256+256, 1024, 1024, 512, 1], [26,32,64,96], [4,8,12], task))

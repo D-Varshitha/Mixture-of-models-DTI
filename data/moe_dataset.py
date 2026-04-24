@@ -136,12 +136,12 @@ class MoEDataset(CPIDataset):
         smi_enc_can = build_seq_enc(smi, CHARCANSMISET)
         seq_enc_std = build_seq_enc(seq, CHARPROTSET)
         
-        batch_dict['dpdta_com'] = torch.tensor(smi_enc_can[:100] + [0]*max(0, 100-len(smi_enc_can)), dtype=torch.long)
-        batch_dict['dpdta_pro'] = torch.tensor(seq_enc_std[:1000] + [0]*max(0, 1000-len(seq_enc_std)), dtype=torch.long)
+        batch_dict['dpdta_com'] = torch.tensor(smi_enc_can[:self.MAX_SMI_LEN] + [0]*max(0, self.MAX_SMI_LEN-len(smi_enc_can)), dtype=torch.long)
+        batch_dict['dpdta_pro'] = torch.tensor(seq_enc_std[:self.MAX_SEQ_LEN] + [0]*max(0, self.MAX_SEQ_LEN-len(seq_enc_std)), dtype=torch.long)
 
         # 2b. Expert: GIF-DTI (Requires ISO-SMILES vocabulary)
         smi_enc_iso = build_seq_enc(smi, CHARISOSMISET)
-        batch_dict['gifdti_com'] = torch.tensor(smi_enc_iso[:100] + [0]*max(0, 100-len(smi_enc_iso)), dtype=torch.long)
+        batch_dict['gifdti_com'] = torch.tensor(smi_enc_iso[:self.MAX_SMI_LEN] + [0]*max(0, self.MAX_SMI_LEN-len(smi_enc_iso)), dtype=torch.long)
         batch_dict['gifdti_pro'] = batch_dict['dpdta_pro'] # uses standard PROTSET
         
         # Safety checks for Embedding sanity
