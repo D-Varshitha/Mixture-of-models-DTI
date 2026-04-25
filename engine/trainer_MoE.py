@@ -4,7 +4,7 @@ import torch
 import pandas as pd
 import time
 from engine.metrics import calculate_performance
-
+import numpy as np
 
 class EarlyStopping:
     def __init__(self, patience=15, verbose=False, delta=0):
@@ -165,8 +165,9 @@ def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
     
     # Pre-calculate quantile for regression for speed
     if args.task == 'regression' and cal_scores is not None:
-        import numpy as np
-        q_val = np.quantile(cal_scores, 1.0 - args.confidence)
+
+        # q_val should be the (1 - alpha) quantile, which is exactly args.confidence
+        q_val = np.quantile(cal_scores, args.confidence)
     else:
         q_val = None
 
