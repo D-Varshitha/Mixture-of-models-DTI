@@ -162,6 +162,13 @@ def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
     total_loss      = 0.0
     total_main_loss = 0.0
     total_aux_loss  = 0.0
+    
+    # Pre-calculate quantile for regression for speed
+    if args.task == 'regression' and cal_scores is not None:
+        import numpy as np
+        q_val = np.quantile(cal_scores, 1.0 - args.confidence)
+    else:
+        q_val = None
 
     with torch.no_grad():
         for batch in loader:
@@ -186,8 +193,9 @@ def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
                 out_np = output.cpu().numpy().tolist()
                 preds.extend(out_np)
                 if cal_scores is not None:
-                    # Apply proper ICP for regression
-                    icp_res = apply_icp_reference_logic(output, cal_scores, args.task, alpha=1.0 - args.confidence)
+                    # Apply proper ICP for regression using pre-calculated q_val
+                    icp_res = apply_icp_reference_logic(output, cal_scores, args.task, 
+                                                        alpha=1.0 - args.confidence, q=q_val)
                     icp_lows.extend([res[1] for res in icp_res])
                     icp_highs.extend([res[2] for res in icp_res])
 

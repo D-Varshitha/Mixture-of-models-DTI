@@ -144,6 +144,12 @@ def main():
     results_path = os.path.join(os.getcwd(), 'results', data_name, args.task)
     os.makedirs(save_path,    exist_ok=True)
     os.makedirs(results_path, exist_ok=True)
+    
+    print(f"--- Path Diagnostics ---")
+    print(f"Current Working Dir: {os.getcwd()}")
+    print(f"Results Path:        {os.path.abspath(results_path)}")
+    print(f"Save Path:           {os.path.abspath(save_path)}")
+    print(f"------------------------\n")
 
     best_results = {}
     # Two-level best-model tracking:

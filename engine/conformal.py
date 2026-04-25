@@ -33,15 +33,16 @@ def calculate_p_value(cal_scores, test_score):
     # (n_cal_where_score >= test_score + 1_for_test_itself) / (n_cal + 1)
     return (count + 1) / (n + 1)
 
-def apply_icp_regression(output, cal_scores, alpha=0.1):
+def apply_icp_regression(output, cal_scores, alpha=0.1, q=None):
     """
     Computes prediction intervals for regression using ICP.
     Matches the objective: [p - q, p + q] where q is the (1-alpha) quantile.
     """
-    preds = output.view(-1).cpu().numpy()
+    preds = output.view(-1).cpu().numpy().flatten()
     
-    # Compute the (1 - alpha) quantile of calibration scores
-    q = np.quantile(cal_scores, 1 - alpha)
+    # Compute the (1 - alpha) quantile of calibration scores if not provided
+    if q is None:
+        q = np.quantile(cal_scores, 1 - alpha)
     
     results = []
     for p in preds:
@@ -50,13 +51,13 @@ def apply_icp_regression(output, cal_scores, alpha=0.1):
         results.append((p, lower, upper))
     return results
 
-def apply_icp_reference_logic(output, cal_scores, task, alpha=0.1):
+def apply_icp_reference_logic(output, cal_scores, task, alpha=0.1, q=None):
     """
     Exactly matches the reference logic for classification, 
     and now implements proper ICP for regression.
     """
     if task == 'classification':
-        probs = torch.sigmoid(output).view(-1).cpu().numpy()
+        probs = torch.sigmoid(output).view(-1).cpu().numpy().flatten()
         results = []
         for p in probs:
             # p_0: p-value assuming true label is 0 (score is p - 0 = p)
@@ -70,5 +71,5 @@ def apply_icp_reference_logic(output, cal_scores, task, alpha=0.1):
             results.append((pred_label, confidence))
         return results
     else:
-        # Proper ICP for regression
-        return apply_icp_regression(output, cal_scores, alpha=alpha)
+        # Proper ICP for regression (passing pre-calculated q for speed)
+        return apply_icp_regression(output, cal_scores, alpha=alpha, q=q)
