@@ -33,7 +33,7 @@ class MoEDataset(CPIDataset):
         self.MAX_SEQ_LEN = MAX_SEQ_LEN
         self.mode = mode
 
-        # GATING: Unified generator for dynamic pretrained embeddings (NO disk storage)
+        # GATING: Unified generator for dynamic pretrained embeddings
         self.generator = PretrainedEmbeddingGenerator(
             esm_model_name=args.esm_model_name,
             chembert_model_name=args.chembert_model_name,
@@ -106,8 +106,7 @@ class MoEDataset(CPIDataset):
 
         # For regression, Davis stores raw Kd in nM → convert to pKd = -log10(Kd/1e9)
         # This brings labels into the ~5–11 range where MSE is meaningful.
-        # KIBA scores are already in a usable range, so no transform is applied.
-        if self.label_type == 'affinity':
+        if self.dataset_name.lower() == 'davis' and self.label_type == 'affinity':
             pkd = -math.log10(max(float(raw_label), 1e-10) / 1e9)
             label = torch.tensor(pkd, dtype=torch.float32)
         else:
@@ -116,7 +115,7 @@ class MoEDataset(CPIDataset):
         smi = self.lig_dic[self.lig[ind]]
         seq = self.pro_dic[self.pro[ind]]
 
-        # ---- 1. Gating Network: Now generates embeddings dynamically (NO disk storage) ----
+        # ---- 1. Gating Network:
         drug_tok = self._get_dynamic_shared_embedding('drug', smi, cid)
         prot_tok = self._get_dynamic_shared_embedding('protein', seq, pid)
         
@@ -142,7 +141,7 @@ class MoEDataset(CPIDataset):
         # 2b. Expert: GIF-DTI (Requires ISO-SMILES vocabulary)
         smi_enc_iso = build_seq_enc(smi, CHARISOSMISET)
         batch_dict['gifdti_com'] = torch.tensor(smi_enc_iso[:self.MAX_SMI_LEN] + [0]*max(0, self.MAX_SMI_LEN-len(smi_enc_iso)), dtype=torch.long)
-        batch_dict['gifdti_pro'] = batch_dict['dpdta_pro'] # uses standard PROTSET
+        batch_dict['gifdti_pro'] = batch_dict['dpdta_pro'] 
         
         # Safety checks for Embedding sanity
         assert batch_dict['gifdti_com'].max() < 65, "GIFDTI drug index exceeds vocab"
@@ -286,14 +285,8 @@ def _pad_tensor_list(tensors, device=None):
     return torch.stack(padded, dim=0), torch.stack(masks, dim=0)
 
 def moe_collate_fn(batch):
-    """
-    Robust collate_fn that pads all variable-length sequence features 
-    and handles expert-specific inputs.
-    """
     collated = {}
-    
-    # 1. Define groups of keys by their padding requirements
-    # Keys that need [PaddedTensor, Mask] return
+
     seq_keys = ['shared_drug', 'shared_prot']
     
     # Experts that use lists of (padded) atom/bond features

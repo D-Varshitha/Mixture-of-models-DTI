@@ -9,7 +9,7 @@ try:
     _TG_AVAILABLE = True
 except ImportError:
     _TG_AVAILABLE = False
-    Data = None  # build_mol_graph will raise clearly if called without torch_geometric
+    Data = None  
 
 from rdkit import Chem
 
@@ -122,7 +122,7 @@ def build_mol_graph(mol):
 def return_single_pro_feat_matrix(seq, feat, fil_aa_list, size):
 
     # get pro feat dict
-    if feat == 'sequencematrix':        # [''.join(enc) for enc in itertools.product(fil_aa_list, repeat=2)]
+    if feat == 'sequencematrix':        
         aa_pair_encodings = {}
         for i in fil_aa_list:
             for p in range(len(fil_aa_list)):
@@ -148,7 +148,7 @@ def return_single_pro_feat_matrix(seq, feat, fil_aa_list, size):
                 for a2 in fil_aa_list:
                     aa_pair_encodings[f'{a1}{a2}'] = 1.0 if a1 == a2 else 0.0
 
-    matrix = np.array([[aa_pair_encodings[f'{i}{j}'] for j in seq] for i in seq])   # j:index, i:column
+    matrix = np.array([[aa_pair_encodings[f'{i}{j}'] for j in seq] for i in seq])  
     
     # padding or chunking
     len_m = len(matrix)

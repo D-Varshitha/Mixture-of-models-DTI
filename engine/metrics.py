@@ -23,13 +23,13 @@ def calculate_performance(df, args):
 def calculate_performance_classification(df,args): # df with columns 'label', 'pred'
     # Raw probabilities for AUC
     prob = np.array(df['pred'])
-    # Rounded predictions for Acc, Pre, Rec, etc.
-    pred = prob.round().tolist()
+    # Explicit threshold at 0.5 for Acc, Pre, Rec, etc.
+    pred = (prob >= 0.5).astype(int)
     label = df[args.label]
     
     acc_ = acc(label, pred)
-    pre_ = pre(label, pred)
-    rec_ = rec(label, pred)
+    pre_ = pre(label, pred, zero_division=0)
+    rec_ = rec(label, pred, zero_division=0)
     try:
         auc_ = auc(label, prob)
     except Exception:
@@ -160,4 +160,4 @@ def ci(y, f):
             j = j - 1
         i = i - 1
         j = i - 1
-    return S / z if z > 0 else 0.0   # guard: z=0 when all labels are identical
+    return S / z if z > 0 else 0.0   

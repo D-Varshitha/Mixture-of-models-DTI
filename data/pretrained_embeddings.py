@@ -33,9 +33,8 @@ class PretrainedEmbeddingGenerator:
         self.device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
         self.protein_chunk_len = protein_chunk_len
         self.protein_chunk_stride = protein_chunk_stride
-        # ChemBERT max_position_embeddings=512; 2 slots used by [CLS]+[EOS] → 510 real tokens
-        self.drug_chunk_len = drug_chunk_len    # max content tokens per chunk
-        self.drug_chunk_stride = drug_chunk_stride  # sliding stride
+        self.drug_chunk_len = drug_chunk_len   
+        self.drug_chunk_stride = drug_chunk_stride 
 
         self._esm_tokenizer = None
         self._esm_model = None
@@ -107,7 +106,7 @@ class PretrainedEmbeddingGenerator:
             add_special_tokens=False,
             return_tensors="pt",
         )
-        all_ids = raw["input_ids"][0]          # [L_tokens]
+        all_ids = raw["input_ids"][0]          
         total_tokens = all_ids.size(0)
 
         chunk_len = max(1, self.drug_chunk_len)
@@ -123,19 +122,19 @@ class PretrainedEmbeddingGenerator:
                 torch.tensor([cls_id], dtype=torch.long),
                 all_ids,
                 torch.tensor([eos_id], dtype=torch.long),
-            ]).unsqueeze(0).to(self.device)           # [1, L+2]
+            ]).unsqueeze(0).to(self.device)           
             attn = torch.ones_like(chunk_with_sp)
             with torch.no_grad():
                 out = self._chem_model(input_ids=chunk_with_sp,
                                        attention_mask=attn)
-            token_embs = out.last_hidden_state.squeeze(0)[1:-1]  # strip [CLS],[EOS]
+            token_embs = out.last_hidden_state.squeeze(0)[1:-1]  
             if token_embs.size(0) == 0:
                 raise RuntimeError(
                     f"ChemBERT returned zero token embeddings for SMILES {smiles!r}")
             return token_embs.cpu()
 
         # ── Step 3: sliding-window path (long SMILES) ────────────────────────
-        hidden_size = self.chembert_hidden_size          # only needed here
+        hidden_size = self.chembert_hidden_size          
         full_embed = torch.zeros(total_tokens, hidden_size, device=self.device)
         counts     = torch.zeros(total_tokens,              device=self.device)
 
@@ -147,7 +146,7 @@ class PretrainedEmbeddingGenerator:
                 torch.tensor([cls_id], dtype=torch.long),
                 chunk_ids,
                 torch.tensor([eos_id], dtype=torch.long),
-            ]).unsqueeze(0).to(self.device)           # [1, chunk_len+2]
+            ]).unsqueeze(0).to(self.device)           
             attn = torch.ones_like(chunk_with_sp)
 
             with torch.no_grad():
