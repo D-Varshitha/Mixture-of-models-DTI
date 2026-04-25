@@ -158,7 +158,7 @@ def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
     from engine.conformal import apply_icp_reference_logic
     model.eval()
     preds, labels, com_ids, pro_ids = [], [], [], []
-    icp_preds, icp_confs = [], []
+    icp_preds, icp_confs, icp_lows, icp_highs = [], [], [], []
     total_loss      = 0.0
     total_main_loss = 0.0
     total_aux_loss  = 0.0
@@ -179,11 +179,17 @@ def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
                 preds.extend(probs)
                 if cal_scores is not None:
                     # Apply reference ICP logic (Selective Prediction)
-                    icp_res = apply_icp_reference_logic(output, cal_scores, args.task)
+                    icp_res = apply_icp_reference_logic(output, cal_scores, args.task, alpha=1.0 - args.confidence)
                     icp_preds.extend([res[0] for res in icp_res])
                     icp_confs.extend([res[1] for res in icp_res])
             else:
-                preds.extend(output.cpu().numpy().tolist())
+                out_np = output.cpu().numpy().tolist()
+                preds.extend(out_np)
+                if cal_scores is not None:
+                    # Apply proper ICP for regression
+                    icp_res = apply_icp_reference_logic(output, cal_scores, args.task, alpha=1.0 - args.confidence)
+                    icp_lows.extend([res[1] for res in icp_res])
+                    icp_highs.extend([res[2] for res in icp_res])
 
             labels.extend(batch_labels.cpu().numpy().tolist())
             com_ids.extend(batch['com_id'])
@@ -196,8 +202,12 @@ def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
         args.label:  labels
     }
     if cal_scores is not None:
-        res_dict['predByICP'] = icp_preds
-        res_dict['confICP']   = icp_confs
+        if args.task == 'classification':
+            res_dict['predByICP'] = icp_preds
+            res_dict['confICP']   = icp_confs
+        else:
+            res_dict['icp_low']  = icp_lows
+            res_dict['icp_high'] = icp_highs
 
     result_df = pd.DataFrame(res_dict)
 

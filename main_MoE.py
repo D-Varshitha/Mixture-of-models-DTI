@@ -227,9 +227,17 @@ def main():
             icp_names = ['ICP_Sub_Accuracy', 'ICP_Selection_Rate', 'ICP_Sub_Count']
             icp_vals  = [icp_acc, sel_rate, sub_count]
         else:
-            # Regression ICP logic from previous implementation
-            icp_names = []
-            icp_vals  = []
+            # Calculate ICP Coverage and Average Interval Width
+            # Theoretical coverage should be ~args.confidence
+            label = result[args.label]
+            low   = result['icp_low']
+            high  = result['icp_high']
+            
+            coverage  = ((label >= low) & (label <= high)).mean()
+            avg_width = (high - low).mean()
+            
+            icp_names = ['ICP_Coverage', 'ICP_Avg_Width']
+            icp_vals  = [coverage, avg_width]
             
         final_metrics = perf.iloc[0].to_dict()
         for name, val in zip(icp_names, icp_vals):
