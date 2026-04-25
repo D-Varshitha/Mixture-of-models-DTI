@@ -106,7 +106,7 @@ class MoEDataset(CPIDataset):
 
         # For regression, Davis stores raw Kd in nM → convert to pKd = -log10(Kd/1e9)
         # This brings labels into the ~5–11 range where MSE is meaningful.
-        if self.dataset_name.lower() == 'davis' and self.label_type == 'affinity':
+        if self.dataset.lower() == 'davis' and self.label_type == 'affinity':
             pkd = -math.log10(max(float(raw_label), 1e-10) / 1e9)
             label = torch.tensor(pkd, dtype=torch.float32)
         else:
