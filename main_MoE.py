@@ -7,6 +7,16 @@ import numpy as np
 import time
 import json
 import pandas as pd
+
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NpEncoder, self).default(obj)
 from torch import nn
 from tqdm import trange
 
@@ -320,7 +330,7 @@ def main():
                 entries = []
     entries.append(log_entry)
     with open(log_file, 'w') as f:
-        json.dump(entries, f, indent=4)
+        json.dump(entries, f, indent=4, cls=NpEncoder)
 
     total_duration = time.time() - start_all
     print(f"\nAll experiments done in {total_duration:.2f}s.")
