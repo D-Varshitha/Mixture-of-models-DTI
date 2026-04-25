@@ -152,7 +152,7 @@ def main():
     global_best_val_loss    = float('inf')
     global_best_model_state = None
     global_best_fold        = -1
-    from data.moe_dataset import moe_collate_fn
+  
 
     for fold in range(num_folds):
         print(f"\n===== FOLD {fold} =====")

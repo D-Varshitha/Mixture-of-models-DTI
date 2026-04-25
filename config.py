@@ -1,7 +1,7 @@
 import argparse
 
 MODELS = ['dcdti', 'dpdta', 'mdprd', 'dp', 'cpi', 'mlp', 'rf', 'svm','perceivercpi', 'smtdta', 'ensdti']
-metrics_classification = ['Acc','Pre','Rec','Spe','AUC','BA']
+metrics_classification = ['Acc','Pre','Rec','Spe','AUC','AUPRC','BA']
 metrics_regression = ['MSE', 'RMSE', 'pearson', 'spearman', 'CI']
 
 
