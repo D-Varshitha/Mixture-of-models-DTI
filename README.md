@@ -24,20 +24,18 @@ Your datasets should be placed inside the `dataset/` directory. Each dataset mus
 
 **Expected Folder Structure:**
 ```text
-DTI-Moe-final/
+DTI-MoE-final/
 │
-├── dataset/
-│   └── davis/                 <-- Name of your dataset
-│       ├── data.csv           <-- Contains columns: lig, pro, smi, seq, lab (or affinity)
-│       ├── fps_1024.npy       <-- Precomputed 1024-bit Morgan Fingerprints
-│       ├── fps_2048.npy       <-- Precomputed 2048-bit Morgan Fingerprints
-│       ├── dp_mpnn.npy        <-- MPNN features for DeepPurpose
-│       ├── mdprd_pro.pth      <-- Protein features for MDeePred
-│       └── dp_pro.npy         <-- Protein features for DeepPurpose
+├── data/                     # Raw and processed data utilities
+├── dataset/                  # Dataset handling and preprocessing
+├── engine/                   # Training, evaluation, and ICP logic
+├── models/                   # All expert models + MoE model
 │
-├── models/                    <-- Contains Expert implementations
-├── engine/                    <-- Contains Training loops and metrics
-└── main_MoE.py                <-- Main execution script
+├── .gitignore                # Git ignored files
+├── config.py                 # Configuration & argument parser
+├── experiment_results.json   # Stored experiment outputs
+├── main_MoE.py               # Main entry point (training/testing)
+├── requirements.txt          # Dependencies
 ```
 
 ---
@@ -55,25 +53,8 @@ Debug mode automatically:
 - Forces the batch size to 16.
 - Stops after 3 epochs.
 
-**Command:**
-```bash
-python main_MoE.py --mode debug --data davis --task classification
-```
-
 ### Full Training Mode
 Once you've verified everything works in debug mode, you can launch a full training experiment. A full run performs rigorous **5-fold cross-validation**, logging results at every step and tracking the best performing model globally.
-
-**Example Command (Classification):**
-```bash
-python main_MoE.py --mode full --data davis --task classification --batch 64 --top_k 2 --epoch 100
-```
-
-**Example Command (Regression):**
-```bash
-python main_MoE.py --mode full --data davis --task regression --batch 64 --top_k 3 --epoch 100
-```
-
----
 
 ## 4. Important Command-Line Arguments
 
@@ -113,5 +94,3 @@ After your experiment finishes, the framework will automatically organize your o
    * Only the **single best epoch of the best fold** is saved to conserve disk space. It will be located in the `saved_models/` folder (e.g., `saved_models/best_model_human_classification.pt`).
 3. **Training Curves:** 
    * Per-epoch history (loss, accuracy, etc.) is saved as a CSV for each fold inside your `results/` folder, making it easy to plot training curves later.
-
-Happy Training!
