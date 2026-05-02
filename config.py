@@ -36,6 +36,7 @@ parser.add_argument('--pro-len', default=1000, type=int, help='customized pro le
 parser.add_argument('--model-mode', default='train_wo_valid', type=str)
 
 # MoE Specific Arguments
+parser.add_argument('--root', default=None, type=str, help='root path for the dataset and project')
 parser.add_argument('--mode', default='full', choices=['debug', 'full'], help='debug mode uses subset size to rapidly test models.')
 parser.add_argument('--subset-size', default=100, type=int, help='number of samples to test in debug mode')
 parser.add_argument('--lambda-aux', default=0.1, type=float, help='weight for auxiliary load balancing loss in MoE')

@@ -112,7 +112,7 @@ def main():
     data_name    = args.data if args.data else 'davis'
     label_col    = 'lab' if args.task == 'classification' else 'affinity'
     args.label   = label_col
-    dataset_root = os.getcwd()
+    dataset_root = args.root if args.root else os.getcwd()
 
     print(f"\nLoading dataset: {data_name}  |  task: {args.task}")
     print(f"  Embeddings  : ESM + ChemBERT — generated dynamically per sample, RAM-cached only")
@@ -149,14 +149,14 @@ def main():
     indices = list(range(len(dataset)))
     random.Random(args.seed).shuffle(indices)
     
-    save_path    = os.path.join(os.getcwd(), 'saved_models')
+    save_path    = os.path.join(dataset_root, 'saved_models')
     # Include task in results_path so classification and regression outputs never overwrite each other
-    results_path = os.path.join(os.getcwd(), 'results', data_name, args.task)
+    results_path = os.path.join(dataset_root, 'results', data_name, args.task)
     os.makedirs(save_path,    exist_ok=True)
     os.makedirs(results_path, exist_ok=True)
     
     print(f"--- Path Diagnostics ---")
-    print(f"Current Working Dir: {os.getcwd()}")
+    print(f"Root Dir:            {dataset_root}")
     print(f"Results Path:        {os.path.abspath(results_path)}")
     print(f"Save Path:           {os.path.abspath(save_path)}")
     print(f"------------------------\n")
@@ -309,7 +309,7 @@ def main():
     print(f"✓ Fold summary (with mean±std) saved → {summary_csv}")
 
     # Log results locally
-    log_file = os.path.join(os.getcwd(), 'experiment_results.json')
+    log_file = os.path.join(dataset_root, 'experiment_results.json')
     log_entry = {
         'timestamp': time.ctime(),
         'dataset': data_name,
