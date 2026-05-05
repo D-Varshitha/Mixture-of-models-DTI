@@ -37,7 +37,10 @@ class EarlyStopping:
         if self.verbose:
             print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).')
         self.val_loss_min = val_loss
-        self.best_model_state = copy.deepcopy(model.state_dict())
+        # Strip DataParallel 'module.' wrapper so the checkpoint is portable
+        # across single-GPU and multi-GPU environments.
+        raw_model = model.module if hasattr(model, 'module') else model
+        self.best_model_state = copy.deepcopy(raw_model.state_dict())
 
 
 def train_moe(train_loader, model, loss_fn, optimizer, args, valid_loader=None):
@@ -73,16 +76,25 @@ def train_moe(train_loader, model, loss_fn, optimizer, args, valid_loader=None):
         start_time = time.time()
 
         num_batches = len(train_loader)
-        for batch in train_loader:
-            optimizer.zero_grad()
+        optimizer.zero_grad()  # Initialize gradients to zero
+        for i, batch in enumerate(train_loader):
             output, aux_loss = model(batch)
             labels = batch['label'].to(output.device).float()
 
             main_loss  = loss_fn(output, labels)
+            
+            if aux_loss.dim() > 0:
+                aux_loss = aux_loss.mean()
+                
             total_loss = main_loss + aux_loss
+            
+            # Normalize the loss by the accumulation steps
+            loss_for_backward = total_loss / args.accumulation_steps
+            loss_for_backward.backward()
 
-            total_loss.backward()
-            optimizer.step()
+            if (i + 1) % args.accumulation_steps == 0 or (i + 1) == num_batches:
+                optimizer.step()
+                optimizer.zero_grad()
 
             epoch_loss      += total_loss.item()
             epoch_main_loss += main_loss.item()
@@ -147,9 +159,12 @@ def train_moe(train_loader, model, loss_fn, optimizer, args, valid_loader=None):
     total_train_time = time.time() - total_train_start
     print(f"\nTotal Training Time (Combined): {total_train_time:.2f}s")
 
-    # Restore the best weights found during this fold before returning
+    # Restore the best weights found during this fold before returning.
+    # Load into the underlying module (not the DataParallel wrapper) so that
+    # the clean state_dict (without 'module.' prefix) loads correctly.
     if early_stopping.best_model_state is not None:
-        model.load_state_dict(early_stopping.best_model_state)
+        raw_model = model.module if hasattr(model, 'module') else model
+        raw_model.load_state_dict(early_stopping.best_model_state)
 
     return model, best_val_metrics, best_val_loss, train_times, val_times, epoch_history
 
@@ -176,6 +191,9 @@ def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
             output, aux_loss = model(batch)
             batch_labels = batch['label'].to(output.device).float()
             main_loss = loss_fn(output, batch_labels)
+
+            if aux_loss.dim() > 0:
+                aux_loss = aux_loss.mean()
 
             loss             = main_loss + aux_loss
             total_loss      += loss.item()

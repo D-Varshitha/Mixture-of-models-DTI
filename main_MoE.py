@@ -18,6 +18,35 @@ class NpEncoder(json.JSONEncoder):
             return obj.tolist()
         return super(NpEncoder, self).default(obj)
 from torch import nn
+from torch.nn.parallel import DataParallel
+
+class CustomDataParallel(DataParallel):
+    def scatter(self, inputs, kwargs, device_ids):
+        batch = inputs[0]
+        B = batch['label'].shape[0]
+        num_gpus = len(device_ids)
+        chunk_size = (B + num_gpus - 1) // num_gpus
+
+        scattered_batches = []
+        for i in range(num_gpus):
+            start = i * chunk_size
+            end = min(start + chunk_size, B)
+            if start >= B:
+                break
+
+            sub_batch = {}
+            for k, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    sub_batch[k] = v[start:end].to(device_ids[i])
+                elif isinstance(v, (list, tuple)):
+                    sub_batch[k] = v[start:end]
+                else:
+                    sub_batch[k] = v
+            scattered_batches.append((sub_batch,))
+
+        scattered_kwargs = [{}] * len(scattered_batches)
+        return scattered_batches, scattered_kwargs
+
 from tqdm import trange
 
 from data.moe_dataset import MoEDataset, moe_collate_fn
@@ -74,7 +103,7 @@ def _validate_dataset_integrity(dataset):
     print(f"[Dataset Integrity] All {len(required_keys)} required keys present. ✓")
 
 
-def _build_experts_and_model(args, device):
+def _build_experts_and_model(args, device, dataset):
     """FIX 4: Called inside the fold loop to reset model state per fold."""
     experts_dict = {
         'dpdta':        build_model('dpdta',        args.task, com_len=args.com_len, pro_len=args.pro_len),
@@ -84,9 +113,22 @@ def _build_experts_and_model(args, device):
         'gifdti':       build_model('gifdti',       args.task, com_len=args.com_len, pro_len=args.pro_len),
         'perceivercpi': build_model('perceivercpi', args.task, com_len=args.com_len, pro_len=args.pro_len),
     }
+    
+    # Extract actual dimensions from the embedding generator
+    drug_dim = dataset.generator.chembert_hidden_size
+    prot_dim = dataset.generator.esm_hidden_size
+    
     moe_model = DTI_Sparse_MoE(
-        experts_dict, drug_vocab=65, prot_vocab=26, k=args.top_k, lambda_aux=args.lambda_aux
+        experts_dict, drug_vocab=65, prot_vocab=26, k=args.top_k, 
+        lambda_aux=args.lambda_aux,
+        drug_pretrained_dim=drug_dim,
+        prot_pretrained_dim=prot_dim
     ).to(device)
+    
+    if torch.cuda.device_count() > 1 and args.device != 'cpu':
+        print(f"Let's use {torch.cuda.device_count()} GPUs!")
+        moe_model = CustomDataParallel(moe_model)
+        
     optimizer = torch.optim.Adam(
         moe_model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
@@ -193,20 +235,27 @@ def main():
                                 train_pool_idx, int(0.1 * len(train_pool_idx)))
             train_idx      = sorted(set(train_pool_idx) - set(valid_idx))
 
+        # Reverting num_workers to 0. Since the dataset dynamically generates
+        # ESM/ChemBERT embeddings using CUDA inside __getitem__, we cannot safely
+        # use multiprocessing (which triggers the CUDA fork/spawn RuntimeError).
+        num_workers = 0
         train_loader = torch.utils.data.DataLoader(
             torch.utils.data.Subset(dataset, train_idx),
-            batch_size=args.batch, shuffle=True, collate_fn=moe_collate_fn, num_workers=0
+            batch_size=args.batch, shuffle=True, collate_fn=moe_collate_fn,
+            num_workers=num_workers, pin_memory=True
         )
         valid_loader = torch.utils.data.DataLoader(
             torch.utils.data.Subset(dataset, valid_idx),
-            batch_size=args.batch, shuffle=False, collate_fn=moe_collate_fn, num_workers=0
+            batch_size=args.batch, shuffle=False, collate_fn=moe_collate_fn,
+            num_workers=num_workers, pin_memory=True
         )
         test_loader = torch.utils.data.DataLoader(
             torch.utils.data.Subset(dataset, test_idx),
-            batch_size=args.batch, shuffle=False, collate_fn=moe_collate_fn, num_workers=0
+            batch_size=args.batch, shuffle=False, collate_fn=moe_collate_fn,
+            num_workers=num_workers, pin_memory=True
         )
 
-        moe_model, optimizer = _build_experts_and_model(args, device)
+        moe_model, optimizer = _build_experts_and_model(args, device, dataset)
 
         # Train (EarlyStopping inside picks best epoch → restores weights)
         moe_model, best_val_metrics, best_val_loss, fold_train_times, fold_val_times, epoch_history = train_moe(
@@ -222,7 +271,10 @@ def main():
         # ── Level-2: update global best across folds ──────────────────────────────
         if best_val_loss < global_best_val_loss:
             global_best_val_loss    = best_val_loss
-            global_best_model_state = copy.deepcopy(moe_model.state_dict())
+            # Strip DataParallel 'module.' prefix so the saved checkpoint
+            # is portable and can be loaded on a single-GPU machine too.
+            raw_model = moe_model.module if hasattr(moe_model, 'module') else moe_model
+            global_best_model_state = copy.deepcopy(raw_model.state_dict())
             global_best_fold        = fold
             print(f"  ✓ New global best model  fold={fold}  val_loss={best_val_loss:.4f}")
 
@@ -237,20 +289,59 @@ def main():
         result, perf, t_loss = test_moe(test_loader, moe_model, loss_fn, args, 
                                         split=f'Test_Fold_{fold}', cal_scores=cal_scores)
         
-        # Calculate Selective ICP Metrics (Accuracy on high-confidence subset)
+        # --- Varying ICP Confidence Evaluation (Reference Style) ---
+        thresholds = [0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
+        icp_results_summary = []
+        
+        print(f"\n{'Threshold':<10} {'Model':<10} {'Count':<8} {'Accuracy':<10} {'Selection%':<12}")
+        print("-" * 55)
+
         if args.task == 'classification':
+            for threshold in thresholds:
+                icp_acc, sel_rate, sub_count = calculate_icp_selective_metrics(result, args, threshold)
+                print(f"{threshold:<10.2f} {'MoE':<10} {sub_count:<8} {icp_acc:<10.3f} {sel_rate*100:<12.1f}%")
+                icp_results_summary.append({
+                    'threshold': threshold,
+                    'accuracy': icp_acc,
+                    'selection_rate': sel_rate,
+                    'count': sub_count
+                })
+            
+            # Use the args.confidence threshold for the "official" final metrics recorded in best_results
             icp_acc, sel_rate, sub_count = calculate_icp_selective_metrics(result, args, args.confidence)
             icp_names = ['ICP_Sub_Accuracy', 'ICP_Selection_Rate', 'ICP_Sub_Count']
             icp_vals  = [icp_acc, sel_rate, sub_count]
         else:
-            # Calculate ICP Coverage and Average Interval Width
-            # Theoretical coverage should be ~args.confidence
+            # For Regression: Calculate coverage at different confidence levels
+            # In regression, confidence = 1 - alpha. 
+            # If threshold is 0.9, we want alpha = 0.1
+            for threshold in thresholds:
+                # Need to recalculate q for each alpha
+                alpha_val = 1.0 - threshold
+                q_val = np.quantile(cal_scores, threshold) # threshold is 1-alpha
+                
+                label = result[args.label]
+                low   = result['pred'] - q_val
+                high  = result['pred'] + q_val
+                
+                coverage  = ((label >= low) & (label <= high)).mean()
+                avg_width = 2 * q_val
+                
+                print(f"{threshold:<10.2f} {'MoE':<10} {len(label):<8} {coverage:<10.3f} {'100.0%':<12} (Width: {avg_width:.3f})")
+                icp_results_summary.append({
+                    'threshold': threshold,
+                    'coverage': coverage,
+                    'avg_width': avg_width
+                })
+
+            # Use args.confidence for final metrics
+            q_final = np.quantile(cal_scores, args.confidence)
             label = result[args.label]
             low   = result['icp_low']
             high  = result['icp_high']
             
-            coverage  = ((label >= low) & (label <= high)).mean()
-            avg_width = (high - low).mean()
+            coverage  = ((label >= result['pred'] - q_final) & (label <= result['pred'] + q_final)).mean()
+            avg_width = 2 * q_final
             
             icp_names = ['ICP_Coverage', 'ICP_Avg_Width']
             icp_vals  = [coverage, avg_width]

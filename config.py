@@ -20,6 +20,7 @@ parser.add_argument('--save-result', metavar='-r', default=True, type=lambda x: 
 parser.add_argument('--save-model', metavar='-r', default=True, type=lambda x: (str(x).lower() == 'true'))
 parser.add_argument('--epoch', metavar='-e', default=100, type=int)
 parser.add_argument('--batch', metavar='-b', default=128, type=int)
+parser.add_argument('--accumulation-steps', default=1, type=int, help='number of batches to accumulate gradients over')
 parser.add_argument('--lr', default=1e-4, type=float)
 parser.add_argument('--device',default='0',type=str)
 parser.add_argument('--split-type', default='random', type=str)

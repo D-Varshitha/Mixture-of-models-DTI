@@ -93,7 +93,7 @@ class SharedGatingEncoder(nn.Module):
     ):
         super().__init__()
         self.embedding   = nn.Embedding(vocab_size, d_model, padding_idx=0)
-        self.pretrained_proj = nn.LazyLinear(d_model)
+        self.pretrained_proj = nn.Linear(pretrained_dim, d_model)
         
         self.pos_encoder = PositionalEncoding(d_model, max_len=max_len)
         encoder_layer    = nn.TransformerEncoderLayer(
@@ -298,6 +298,8 @@ class DTI_Sparse_MoE(nn.Module):
         prot_vocab:   int   = 26,
         k:            int   = 2,
         lambda_aux:   float = 0.1,
+        drug_pretrained_dim: int = 768,
+        prot_pretrained_dim: int = 640,
     ):
         super().__init__()
         self.num_experts  = len(experts_dict)
@@ -314,7 +316,9 @@ class DTI_Sparse_MoE(nn.Module):
 
         # Gating network  (uses token-level embeddings internally)
         self.gate = SharedGatingNetwork(
-            drug_vocab, prot_vocab, num_experts=self.num_experts
+            drug_vocab, prot_vocab, num_experts=self.num_experts,
+            drug_pretrained_dim=drug_pretrained_dim,
+            prot_pretrained_dim=prot_pretrained_dim
         )
 
 
@@ -331,7 +335,7 @@ class DTI_Sparse_MoE(nn.Module):
             aux_loss     : scalar    – weighted load-balancing loss
         """
         B      = batch['label'].shape[0]
-        device = next(self.parameters()).device
+        device = batch['label'].device
 
 
         drug_tokens = batch['shared_drug'].to(device)        # [B, L_d]
