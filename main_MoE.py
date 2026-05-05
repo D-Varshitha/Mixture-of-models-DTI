@@ -345,7 +345,14 @@ def main():
             
             icp_names = ['ICP_Coverage', 'ICP_Avg_Width']
             icp_vals  = [coverage, avg_width]
-            
+
+        # --- Save ICP Summary Table to CSV ---
+        if args.save_result:
+            icp_summary_df = pd.DataFrame(icp_results_summary)
+            icp_summary_file = os.path.join(results_path, f"ICP_Threshold_Summary_Fold_{fold}.csv")
+            icp_summary_df.to_csv(icp_summary_file, index=False)
+            print(f"  ✓ ICP Threshold Summary saved to: {icp_summary_file}")
+
         final_metrics = perf.iloc[0].to_dict()
         for name, val in zip(icp_names, icp_vals):
             final_metrics[name] = val

@@ -1,75 +1,82 @@
 import numpy as np
 import torch
 
+
+# -------------------------------
+# 1. Calibration Scores
+# -------------------------------
 def get_calibration_scores(model, loader, task):
-    """
-    Returns the non-conformity scores for the calibration (validation) set.
-    """
     model.eval()
     scores = []
+
     with torch.no_grad():
         for batch in loader:
             output, _ = model(batch)
-            labels = batch['label'].to(output.device).float()
-            
+
+            labels = batch['label'].to(output.device).float().view(-1)
+            preds = output.view(-1)
+
             if task == 'classification':
-                probs = torch.sigmoid(output)
-                # Non-conformity score: abs(pred - label)
+                probs = torch.sigmoid(preds)
                 batch_scores = torch.abs(probs - labels)
             else:
-                batch_scores = torch.abs(output - labels)
-            
-            scores.extend(batch_scores.cpu().numpy().flatten())
+                batch_scores = torch.abs(preds - labels)
+
+            scores.extend(batch_scores.cpu().numpy())
+
     return np.array(scores)
 
+
+# -------------------------------
+# 2. P-value (Classification ICP)
+# -------------------------------
 def calculate_p_value(cal_scores, test_score):
-    """
-    p-value = (number of calibration scores >= test_score) / (n_cal + 1)
-    """
     n = len(cal_scores)
     count = np.sum(cal_scores >= test_score)
-    # The reference code uses (count) / (n + 1) where test_score is included in the rank.
-    # To match reference logic exactly: 
-    # (n_cal_where_score >= test_score + 1_for_test_itself) / (n_cal + 1)
     return (count + 1) / (n + 1)
 
+
+# -------------------------------
+# 3. ICP Regression (FIXED)
+# -------------------------------
 def apply_icp_regression(output, cal_scores, alpha=0.1, q=None):
-    """
-    Computes prediction intervals for regression using ICP.
-    Matches the objective: [p - q, p + q] where q is the (1-alpha) quantile.
-    """
-    preds = output.view(-1).cpu().numpy().flatten()
-    
-    # Compute the (1 - alpha) quantile of calibration scores if not provided
+    preds = output.view(-1).cpu().numpy()
+
+    # Compute quantile once
     if q is None:
         q = np.quantile(cal_scores, 1 - alpha)
-    
-    results = []
-    for p in preds:
-        lower = p - q
-        upper = p + q
-        results.append((p, lower, upper))
-    return results
 
+    lower = preds - q
+    upper = preds + q
+
+    # Return structured output (better than list of tuples)
+    return {
+        "pred": preds,
+        "lower": lower,
+        "upper": upper,
+        "q": q
+    }
+
+
+# -------------------------------
+# 4. Unified ICP Logic
+# -------------------------------
 def apply_icp_reference_logic(output, cal_scores, task, alpha=0.1, q=None):
-    """
-    Exactly matches the reference logic for classification, 
-    and now implements proper ICP for regression.
-    """
+
     if task == 'classification':
-        probs = torch.sigmoid(output).view(-1).cpu().numpy().flatten()
+        probs = torch.sigmoid(output).view(-1).cpu().numpy()
+
         results = []
         for p in probs:
-            # p_0: p-value assuming true label is 0 (score is p - 0 = p)
             p_0 = calculate_p_value(cal_scores, p)
-            # p_1: p-value assuming true label is 1 (score is abs(p - 1) = 1 - p)
             p_1 = calculate_p_value(cal_scores, 1.0 - p)
-            
-            # Predict the class with the highest p-value (lowest non-conformity)
+
             pred_label = 1 if p_1 > p_0 else 0
             confidence = max(p_0, p_1)
+
             results.append((pred_label, confidence))
+
         return results
+
     else:
-        # Proper ICP for regression (passing pre-calculated q for speed)
-        return apply_icp_regression(output, cal_scores, alpha=alpha, q=q)
+        return apply_icp_regression(output, cal_scores, alpha, q)

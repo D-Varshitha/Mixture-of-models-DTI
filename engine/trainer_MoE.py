@@ -215,8 +215,8 @@ def test_moe(loader, model, loss_fn, args, split='Test', cal_scores=None):
                     # Apply proper ICP for regression using pre-calculated q_val
                     icp_res = apply_icp_reference_logic(output, cal_scores, args.task, 
                                                         alpha=1.0 - args.confidence, q=q_val)
-                    icp_lows.extend([res[1] for res in icp_res])
-                    icp_highs.extend([res[2] for res in icp_res])
+                    icp_lows.extend(icp_res['lower'].tolist())
+                    icp_highs.extend(icp_res['upper'].tolist())
 
             labels.extend(batch_labels.cpu().numpy().tolist())
             com_ids.extend(batch['com_id'])
