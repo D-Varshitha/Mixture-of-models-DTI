@@ -106,10 +106,10 @@ def calculate_icp_selective_metrics(df, args, threshold):
         return [0.0, 0.0, 0] # Accuracy, Selection Rate, Count
     
     correct = (sub_df['predByICP'] == sub_df[args.label]).sum()
-    accuracy = correct / sub_count
-    selection_rate = sub_count / total_samples
+    accuracy = float(correct / sub_count)
+    selection_rate = float(sub_count / total_samples)
     
-    return [accuracy, selection_rate, sub_count]
+    return [accuracy, selection_rate, int(sub_count)]
 
 def calculate_icp_metrics_regression(df, args, threshold):
     """
