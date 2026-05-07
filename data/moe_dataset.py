@@ -198,8 +198,12 @@ class MoEDataset(CPIDataset):
     # ── main data retrieval ──────────────────────────────────────────────────
 
     def __getitem__(self, ind):
-        cid       = self.lig_mapping.inverse[self.lig[ind]]   # integer index → str ID
-        pid       = self.pro_mapping.inverse[self.pro[ind]]
+        # cid / pid are INTEGER positional indices into the unique-drug and
+        # unique-protein numpy arrays (fp_2048, mpnn_data, mdprd_data, …).
+        # The string IDs (self.lig[ind], self.pro[ind]) are used as keys into
+        # the embedding cache dicts — these two key spaces must NOT be mixed.
+        cid = self.lig_mapping.inverse[self.lig[ind]]   # int: position in unique-drug list
+        pid = self.pro_mapping.inverse[self.pro[ind]]   # int: position in unique-protein list
         raw_label = self.label[ind]
 
         # Convert raw Davis Kd (nM) to pKd for regression
@@ -213,8 +217,9 @@ class MoEDataset(CPIDataset):
         seq = self.pro_dic[self.pro[ind]]
 
         # ---- 1. Gating: fetch cached embeddings (NO model forward pass) -----
-        drug_tok = self._get_drug_embedding(cid)   # [L_d, H_d]  CPU float32
-        prot_tok = self._get_prot_embedding(pid)   # [L_p, H_p]  CPU float32
+        # Use string IDs as cache keys (matches how build_embedding_cache stored them)
+        drug_tok = self._get_drug_embedding(self.lig[ind])   # [L_d, H_d]  CPU float32
+        prot_tok = self._get_prot_embedding(self.pro[ind])   # [L_p, H_p]  CPU float32
 
         batch_dict = {
             'com_id':           self.lig[ind],
@@ -393,8 +398,9 @@ class MoEDataset(CPIDataset):
                 )
 
             # ── Validate cached embeddings for these sample IDs ───────────
-            drug_tok = self._get_drug_embedding(cid)
-            prot_tok = self._get_prot_embedding(pid)
+            # Use string IDs as cache keys — cid/pid are integers for numpy arrays
+            drug_tok = self._get_drug_embedding(self.lig[ind])
+            prot_tok = self._get_prot_embedding(self.pro[ind])
 
             if drug_tok.ndim != 2 or drug_tok.shape[0] <= 0 \
                     or drug_tok.shape[1] != self.chembert_hidden_size:

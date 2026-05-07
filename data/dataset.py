@@ -57,10 +57,7 @@ CHARPROTSET = { "A": 1, "C": 2, "B": 3, "E": 4, "D": 5, "G": 6,
 
 
 
-PRO_3GRAM_DICT = {}
-AMINO = ''.join(CHARPROTSET.keys())
-for idx, item in enumerate(product('-'+AMINO, AMINO, AMINO+'=')):
-    PRO_3GRAM_DICT[''.join(item)] = idx
+
 
 
 # input -> dataset (e.g.: kiba, davis ...)
@@ -395,36 +392,6 @@ class CPIDataset(InMemoryDataset):
             self.generate_word(amino)
         elif pf == 'dp':
             self.generate_dp_pro_feat()
-        
-        # sequneces = {}
-        # seq_one_hot_encodings = []
-        # seq_encodings = []
-        # fasta =""
-        # three_grams = []
-
-        # for pro, seq in self.pro_dic.items():
-        #     sequneces[pro] = seq
-        #     one_hot_seq = build_one_hot_enc(seq, self.MAX_SEQ_LEN, CHARPROTSET)
-        #     seq_one_hot_encodings.append(one_hot_seq)
-        #     seq_enc = build_seq_enc(seq, CHARPROTSET)
-        #     seq_encodings.append(seq_enc)
-        #     fasta += f'>xxx|{pro}|xxx\n{seq}\n'
-        #     gram3 = build_ngram(seq, 3, PRO_3GRAM_DICT)
-        #     three_grams.append(gram3)
-
-        # fasta_file = f'{self.pro_feat_dir}/sequences.fasta'
-        # with open(fasta_file,'w') as f:
-        #     f.write(fasta)
-        # with open(f'{self.pro_feat_dir}/sequences.json','w') as f:
-        #     f.write(json.dumps(sequneces))
-        
-        # seq_encodings = np.array(seq_encodings, dtype=object)
-        # np.save(f'{self.pro_feat_dir}/three_grams.npy', three_grams)
-        # np.save(f'{self.pro_feat_dir}/sequences_encodings.npy', seq_encodings)
-        
-        # for pro_feat in PROTEIN_FEATURES:
-        #     pro_feat_out_file = f'{self.pro_feat_dir}/{pro_feat}.csv'
-        #     os.system(f'python {self.root}/support/iLearn/iLearn-protein-basic.py --file {fasta_file} --method {pro_feat} --format csv --out {pro_feat_out_file}')
         return
     
     def generate_seq_enc(self, MAX_SEQ_LEN):
@@ -486,10 +453,6 @@ class CPIDataset(InMemoryDataset):
         seqs_dic = json.load(open(f'{self.pro_feat_dir}/sequences.json'))
         return seqs_dic
 
-    @property
-    def get_3gram(self):
-        three_grams = np.load(f'{self.pro_feat_dir}/three_grams.npy', allow_pickle=True)
-        return three_grams
 
     def get_seq_enc(self, MAX_SEQ_LEN):
         seq_enc = np.load(f'{self.pro_feat_dir}/sequences_encodings_{MAX_SEQ_LEN}.npy', allow_pickle=True)
@@ -511,23 +474,6 @@ class CPIDataset(InMemoryDataset):
         pro_feat = torch.load(f'{self.pro_feat_dir}/mdprd_pro.pth')
         return pro_feat
 
-    @property
-    def get_AAC(self):
-        AAC = pd.read_csv(f'{self.pro_feat_dir}/AAC.csv', header=None, index_col=0)
-        AAC_dict = AAC.to_dict()
-        return AAC_dict
-
-    @property
-    def get_PAAC(self):
-        PAAC = pd.read_csv(f'{self.pro_feat_dir}/PAAC.csv', header=None, index_col=0)
-        PAAC_dict = PAAC.to_dict()
-        return PAAC_dict
-
-    @property
-    def get_DDE(self):
-        DDE = pd.read_csv(f'{self.pro_feat_dir}/DDE.csv', header=None, index_col=0)
-        DDE_dict = DDE.to_dict()
-        return DDE_dict
 
     def get(self, idx):
         mol = self.lig[idx]
@@ -546,10 +492,6 @@ class CustomCPIDataset(CPIDataset):
     def __init__(self, root, dataset, MAX_SMI_LEN, MAX_SEQ_LEN, label_type, cf, pf, mode):
         # super(CustomCPIDataset, self).__init__(root, dataset, MAX_SMI_LEN, MAX_SEQ_LEN, label_type, mode)
         super(CustomCPIDataset, self).__init__(root, dataset, label_type, mode)
-        # print(f'MAX SMI len: {MAX_SMI_LEN}, MAX SEQ len: {MAX_SEQ_LEN}')
-
-        # print(root, dataset, MAX_SMI_LEN, MAX_SEQ_LEN, label_type, cf, pf, mode)
-        
         if mode == 'generate':
             self.process_molecule(MAX_SMI_LEN, cf)
             self.process_protein(MAX_SEQ_LEN, pf)
@@ -569,8 +511,6 @@ class CustomCPIDataset(CPIDataset):
             self.word_num = len(self.amino)*(len(self.amino)+1)*(len(self.amino)+1)
         elif cf == 'mpnn':
             com_feat = self.get_mpnn_feature
-
-
         if pf == 'seq_enc':
             pro_feat = self.get_seq_enc(MAX_SEQ_LEN)
         elif pf == 'mdprd':
@@ -648,157 +588,4 @@ class CustomCPIDataset(CPIDataset):
             return {'com_id':self.lig[ind], 'pro_id':self.pro[ind], 'com_feat':com_feat, 'pro_feat':self.pro_feat[ind], 'label':lab}
         else:
             return {'com_id':self.lig[ind], 'pro_id':self.pro[ind], 'com_feat':com_feat, 'com_adj':com_adj, 'pro_feat':self.pro_feat[ind], 'label':lab}
-
-
-
-
-# class DataLoader(torch.utils.data.DataLoader):
-
-#     def __init__(
-#         self,
-#         dataset,
-#         com_feat: str,
-#         pro_feat: str,
-#         batch_size: int = 1,
-#         shuffle: bool = False,
-#         follow_batch: Optional[List[str]] = None,
-#         exclude_keys: Optional[List[str]] = None,
-#         **kwargs,
-#     ):
-#         if 'collate_fn' in kwargs:
-#             del kwargs['collate_fn']
-        
-#         '''  '''
-
-#         super().__init()__
-
-
-# def onek_encoding_unk(x, allowable_set):
-#     if x not in allowable_set:
-#         x = allowable_set[-1]
-#     return list(map(lambda s: x == s, allowable_set))
-
-
-# def atom_features(atom):
-#     return torch.Tensor(onek_encoding_unk(atom.GetSymbol(), ELEM_LIST) 
-#             + onek_encoding_unk(atom.GetDegree(), [0,1,2,3,4,5]) 
-#             + onek_encoding_unk(atom.GetFormalCharge(), [-1,-2,1,2,0])
-#             + onek_encoding_unk(int(atom.GetChiralTag()), [0,1,2,3])
-#             + [atom.GetIsAromatic()])
-
-# def bond_features(bond):
-#     bt = bond.GetBondType()
-#     stereo = int(bond.GetStereo())
-#     fbond = [bt == Chem.rdchem.BondType.SINGLE, bt == Chem.rdchem.BondType.DOUBLE, bt == Chem.rdchem.BondType.TRIPLE, bt == Chem.rdchem.BondType.AROMATIC, bond.IsInRing()]
-#     fstereo = onek_encoding_unk(stereo, [0,1,2,3,4,5])
-#     return torch.Tensor(fbond + fstereo)
-
-# def build_one_hot_enc(line, max_len, chars):
-# 	X = np.zeros((max_len, len(chars))) #+1
-# 	for i, ch in enumerate(line[:max_len]):
-# 		X[i, (chars[ch]-1)] = 1 
-# 	return X #.tolist()
-
-# def build_seq_enc(line, chars):
-#     X = []
-#     for i,ch in enumerate(line):
-#         X.append(chars[ch])
-#     return X
-
-# def build_ngram(seq, N, dic):
-#     seq = '-' + seq + '='
-#     words = [dic[seq[i:i+N]]
-#              for i in range(len(seq)-N+1)]
-#     return np.array(words)
-
-# def build_mol_graph(mol):
-#     atom_features_list = []
-#     for atom in mol.GetAtoms():
-#         atom_feature = atom_to_feature_vector(atom)
-#         atom_features_list.append(atom_feature)
-#     x = torch.tensor(np.array(atom_features_list), dtype=torch.long)
-
-#     if len(mol.GetBonds()) <= 0:
-#         num_bond_features = 3
-#         edge_index = torch.empty((2,0), dtype=torch.long)
-#         edge_attr = torch.empty((0, num_bond_features), dtype=torch.long)
-#     else:
-#         edges_list = []
-#         edge_features_list = []
-#         for bond in mol.GetBonds():
-#             i = bond.GetBeginAtomIdx()
-#             j = bond.GetEndAtomIdx()
-#             edge_feature = bond_to_feature_vector(bond)
-
-#             edges_list.append((i,j))
-#             edge_features_list.append(edge_feature)
-#             edges_list.append((j,i))
-#             edge_features_list.append(edge_feature)
-
-#         edge_index = torch.tensor(np.array(edges_list).T, dtype=torch.long)
-#         edge_attr = torch.tensor(np.array(edge_features_list), dtype=torch.long)
-
-#         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-
-#         return data
-
-# def return_single_pro_feat_matrix(seq, feat, fil_aa_list, size):
-
-#     # get pro feat dict
-#     if feat == 'sequencematrix':        # [''.join(enc) for enc in itertools.product(fil_aa_list, repeat=2)]
-#         aa_pair_encodings = {}
-#         for i in fil_aa_list:
-#             for p in range(len(fil_aa_list)):
-#                 j = fil_aa_list[p]
-#                 aa_pair_encodings[f'{i}{j}'] = aa_pair_encodings[f'{j}{i}'] = p+1
-#     else:
-#         aa_pair_encodings = json.load(open(f'support/encodings/{feat}.json', 'r'))
-#     matrix = np.array([[aa_pair_encodings[f'{i}{j}'] for j in seq] for i in seq])   # j:index, i:column
-    
-#     # padding or chunking
-#     len_m = len(matrix)
-#     if len_m < size:
-#         pad_l = (size - len_m) // 2
-#         pad_r = pad_l + 1 if (size - len_m) % 2 else pad_l
-#         matrix = np.pad(matrix,((pad_l, pad_r),(pad_l, pad_r)), mode='constant', constant_values=((0,0),(0,0)))
-#     else:
-#         matrix = matrix[:size, :size]
-#     # print(len(matrix))
-#     return matrix.flatten()
-
-# def create_ijbonddict(mol, bond_dict):
-#     i_jbond_dict = defaultdict(lambda: [])
-#     for b in mol.GetBonds():
-#         i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
-#         bond = bond_dict[str(b.GetBondType())]
-#         i_jbond_dict[i].append((j, bond))
-#         i_jbond_dict[j].append((i, bond))
-#     return i_jbond_dict
-
-# def extract_fingerprints(atoms, i_jbond_dict, edge_dict, fingerprint_dict):
-#     radius = 2
-#     nodes = atoms
-#     i_jedge_dict = i_jbond_dict
-
-#     if len(atoms) == 1:
-#         fingerprints = [fingerprint_dict[a] for a in atoms]
-#     else:
-#         for _ in range(radius):
-#             fingerprints = []
-#             for i, j_edge in i_jedge_dict.items():
-#                 neighbors = [(nodes[j], edge) for j, edge in j_edge]
-#                 fingerprint = (nodes[i], tuple(sorted(neighbors)))
-#                 fingerprints.append(fingerprint_dict[fingerprint])
-#                 for j, edge in j_edge:
-#                     both_side = tuple(sorted((nodes[i], nodes[j])))
-#                     edge = edge_dict[(both_side, edge)]
-#     return np.array(fingerprints)
-
-# def mapping_bool(value, l):
-#     if value not in l:
-#         return [False] * (len(l)-1) + [True]
-#     else:
-#         bool_l = [False] * len(l)
-#         bool_l[l.index(value)] = True
-#         return bool_l
 
