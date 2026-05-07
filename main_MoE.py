@@ -1,39 +1,63 @@
-import torch
-import os
-import sys
-import copy
-import random
-import numpy as np
-import time
-import json
-import pandas as pd
+"""
+main_MoE.py
+===========
+Entry-point for the DTI Sparse Mixture-of-Experts training pipeline.
 
-class NpEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super(NpEncoder, self).default(obj)
+Key upgrades over previous version
+-----------------------------------
+* Offline embedding cache (ESM2 + ChemBERT) — no HF model runs per batch.
+* Safe checkpointing every epoch (latest + best).
+* Resume training via --resume-training / --checkpoint-path.
+* Graceful KeyboardInterrupt handling with emergency checkpoint save.
+* Bug fix: uses dataset.chembert_hidden_size / esm_hidden_size (from cache)
+  instead of generator.{property} (which would reload HF models).
+* Bug fix: stale print message updated to reflect offline-cache pipeline.
+* Bug fix: regression ICP table header corrected (Coverage / Width).
+* Root path accepted from CLI (--root) and propagated to ALL path derivations.
+"""
+
+import copy
+import json
+import os
+import random
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+import torch
 from torch import nn
 from torch.nn.parallel import DataParallel
 
+# ---------------------------------------------------------------------------
+# NpEncoder — safe JSON serialization of numpy scalars / arrays
+# ---------------------------------------------------------------------------
+
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):  return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray):  return obj.tolist()
+        return super().default(obj)
+
+
+# ---------------------------------------------------------------------------
+# CustomDataParallel — dict-aware scatter for multi-GPU training
+# ---------------------------------------------------------------------------
+
 class CustomDataParallel(DataParallel):
     def scatter(self, inputs, kwargs, device_ids):
-        batch = inputs[0]
-        B = batch['label'].shape[0]
-        num_gpus = len(device_ids)
+        batch     = inputs[0]
+        B         = batch["label"].shape[0]
+        num_gpus  = len(device_ids)
         chunk_size = (B + num_gpus - 1) // num_gpus
 
         scattered_batches = []
         for i in range(num_gpus):
             start = i * chunk_size
-            end = min(start + chunk_size, B)
+            end   = min(start + chunk_size, B)
             if start >= B:
                 break
-
             sub_batch = {}
             for k, v in batch.items():
                 if isinstance(v, torch.Tensor):
@@ -44,106 +68,176 @@ class CustomDataParallel(DataParallel):
                     sub_batch[k] = v
             scattered_batches.append((sub_batch,))
 
-        scattered_kwargs = [{}] * len(scattered_batches)
-        return scattered_batches, scattered_kwargs
+        return scattered_batches, [{}] * len(scattered_batches)
 
-from tqdm import trange
+
+# ---------------------------------------------------------------------------
+# Imports (after class definitions to avoid circular issues at module level)
+# ---------------------------------------------------------------------------
 
 from data.moe_dataset import MoEDataset, moe_collate_fn
+from engine.checkpointing import (
+    checkpoint_dir_for,
+    checkpoint_paths_for,
+    load_checkpoint,
+    emergency_save,
+)
+from engine.conformal import apply_icp_reference_logic, get_calibration_scores
+from engine.metrics import calculate_icp_selective_metrics
+from engine.trainer_MoE import train_moe, test_moe
 from models import build_model
 from models.model_MoE import DTI_Sparse_MoE
-from engine.trainer_MoE import train_moe, test_moe
-from engine.conformal import get_calibration_scores, apply_icp_reference_logic
-from engine.metrics import calculate_icp_selective_metrics
 from config import args, metrics_classification, metrics_regression
 
 
+# ---------------------------------------------------------------------------
+# Dataset integrity check
+# ---------------------------------------------------------------------------
+
 def _validate_dataset_integrity(dataset):
-    """FIX 2: Run once before training to ensure all required keys and shapes are present."""
+    """Verify all required sample keys and tensor shapes are present."""
     required_keys = [
-        'label', 'shared_drug', 'shared_prot', 'shared_drug_mask', 'shared_prot_mask',
-        'dpdta_com', 'dpdta_pro',
-        'dcdti_com', 'dcdti_pro',
-        'mdprd_com', 'mdprd_pro',
-        'gifdti_com', 'gifdti_pro', 'gifdti_com_mask', 'gifdti_pro_mask',
-        'pcpi_graph', 'pcpi_morgan', 'pcpi_sequence',
-        'dp_af', 'dp_bf', 'dp_ag', 'dp_bg', 'dp_abn', 'dp_pro',
+        "label", "shared_drug", "shared_prot",
+        "shared_drug_mask", "shared_prot_mask",
+        "dpdta_com", "dpdta_pro",
+        "dcdti_com", "dcdti_pro",
+        "mdprd_com", "mdprd_pro",
+        "gifdti_com", "gifdti_pro", "gifdti_com_mask", "gifdti_pro_mask",
+        "pcpi_graph", "pcpi_morgan", "pcpi_sequence",
+        "dp_af", "dp_bf", "dp_ag", "dp_bg", "dp_abn", "dp_pro",
     ]
     base = dataset.dataset if isinstance(dataset, torch.utils.data.Subset) else dataset
-    sample_ids = sorted(set([0, max(0, len(base) // 2), max(0, len(base) - 1)]))
-    for sample_id in sample_ids:
-        sample = base[sample_id]
+    sample_ids = sorted({0, max(0, len(base) // 2), max(0, len(base) - 1)})
+
+    for sid in sample_ids:
+        sample = base[sid]
 
         missing = [k for k in required_keys if k not in sample]
         if missing:
-            raise RuntimeError(f"[Dataset Integrity] Missing keys in dataset sample {sample_id}: {missing}")
-
-        empty = []
-        for k, v in sample.items():
-            if isinstance(v, torch.Tensor) and v.numel() == 0:
-                empty.append(k)
-            elif isinstance(v, list) and len(v) == 0:
-                empty.append(k)
+            raise RuntimeError(
+                f"[Dataset Integrity] Missing keys in sample {sid}: {missing}"
+            )
+        empty = [
+            k for k, v in sample.items()
+            if (isinstance(v, torch.Tensor) and v.numel() == 0)
+            or (isinstance(v, list) and len(v) == 0)
+        ]
         if empty:
-            raise RuntimeError(f"[Dataset Integrity] Empty tensors in sample {sample_id}: {empty}")
+            raise RuntimeError(
+                f"[Dataset Integrity] Empty tensors in sample {sid}: {empty}"
+            )
 
-        if sample['dcdti_com'].shape[-1] != 2048:
-            raise RuntimeError(f"[Dataset Integrity] dcdti_com dim mismatch in sample {sample_id}: {sample['dcdti_com'].shape}")
-        if sample['mdprd_com'].shape[-1] != 1024:
-            raise RuntimeError(f"[Dataset Integrity] mdprd_com dim mismatch in sample {sample_id}: {sample['mdprd_com'].shape}")
-        if sample['pcpi_morgan'].shape[-1] != 1024:
-            raise RuntimeError(f"[Dataset Integrity] pcpi_morgan dim mismatch in sample {sample_id}: {sample['pcpi_morgan'].shape}")
-        if tuple(sample['mdprd_pro'].shape) != (5, 500, 500):
-            raise RuntimeError(f"[Dataset Integrity] mdprd_pro shape mismatch in sample {sample_id}: {sample['mdprd_pro'].shape}")
-        if sample['shared_drug'].ndim != 2 or sample['shared_prot'].ndim != 2:
-            raise RuntimeError(f"[Dataset Integrity] Shared embeddings must stay token-level in sample {sample_id}.")
-        if sample['dcdti_pro'].dtype != torch.long:
-            raise RuntimeError(f"[Dataset Integrity] dcdti_pro must be integer token IDs in sample {sample_id}.")
+        checks = {
+            "dcdti_com  shape[-1] == 2048": sample["dcdti_com"].shape[-1] == 2048,
+            "mdprd_com  shape[-1] == 1024": sample["mdprd_com"].shape[-1] == 1024,
+            "pcpi_morgan shape[-1] == 1024": sample["pcpi_morgan"].shape[-1] == 1024,
+            "mdprd_pro shape == (5,500,500)": tuple(sample["mdprd_pro"].shape) == (5, 500, 500),
+            "shared_drug ndim == 2": sample["shared_drug"].ndim == 2,
+            "shared_prot ndim == 2": sample["shared_prot"].ndim == 2,
+            "dcdti_pro dtype == long": sample["dcdti_pro"].dtype == torch.long,
+        }
+        for desc, ok in checks.items():
+            if not ok:
+                raise RuntimeError(
+                    f"[Dataset Integrity] {desc} failed in sample {sid}. "
+                    f"Got: {sample.get(desc.split()[0], 'N/A')}"
+                )
 
     print(f"[Dataset Integrity] All {len(required_keys)} required keys present. ✓")
 
 
+# ---------------------------------------------------------------------------
+# Model builder
+# ---------------------------------------------------------------------------
+
 def _build_experts_and_model(args, device, dataset):
-    """FIX 4: Called inside the fold loop to reset model state per fold."""
+    """Build fresh expert models + MoE wrapper + Adam optimizer."""
     experts_dict = {
-        'dpdta':        build_model('dpdta',        args.task, com_len=args.com_len, pro_len=args.pro_len),
-        'dcdti':        build_model('dcdti',        args.task, com_len=args.com_len, pro_len=args.pro_len),
-        'dp':           build_model('dp',           args.task, com_len=args.com_len, pro_len=args.pro_len),
-        'mdprd':        build_model('mdprd',        args.task, com_len=args.com_len, pro_len=args.pro_len),
-        'gifdti':       build_model('gifdti',       args.task, com_len=args.com_len, pro_len=args.pro_len),
-        'perceivercpi': build_model('perceivercpi', args.task, com_len=args.com_len, pro_len=args.pro_len),
+        "dpdta":        build_model("dpdta",        args.task, com_len=args.com_len, pro_len=args.pro_len),
+        "dcdti":        build_model("dcdti",        args.task, com_len=args.com_len, pro_len=args.pro_len),
+        "dp":           build_model("dp",           args.task, com_len=args.com_len, pro_len=args.pro_len),
+        "mdprd":        build_model("mdprd",        args.task, com_len=args.com_len, pro_len=args.pro_len),
+        "gifdti":       build_model("gifdti",       args.task, com_len=args.com_len, pro_len=args.pro_len),
+        "perceivercpi": build_model("perceivercpi", args.task, com_len=args.com_len, pro_len=args.pro_len),
     }
-    
-    # Extract actual dimensions from the embedding generator
-    drug_dim = dataset.generator.chembert_hidden_size
-    prot_dim = dataset.generator.esm_hidden_size
-    
+
+    # BUG FIX: use dataset.{hidden_size} (read from cache metadata) instead of
+    # dataset.generator.{property} which triggers a full HF model forward pass.
+    drug_dim = dataset.chembert_hidden_size
+    prot_dim = dataset.esm_hidden_size
+
     moe_model = DTI_Sparse_MoE(
-        experts_dict, drug_vocab=65, prot_vocab=26, k=args.top_k, 
-        lambda_aux=args.lambda_aux,
-        drug_pretrained_dim=drug_dim,
-        prot_pretrained_dim=prot_dim
+        experts_dict,
+        drug_vocab          = 65,
+        prot_vocab          = 26,
+        k                   = args.top_k,
+        lambda_aux          = args.lambda_aux,
+        drug_pretrained_dim = drug_dim,
+        prot_pretrained_dim = prot_dim,
     ).to(device)
-    
-    if torch.cuda.device_count() > 1 and args.device != 'cpu':
-        print(f"Let's use {torch.cuda.device_count()} GPUs!")
+
+    if torch.cuda.device_count() > 1 and args.device != "cpu":
+        print(f"  Using {torch.cuda.device_count()} GPUs (CustomDataParallel).")
         moe_model = CustomDataParallel(moe_model)
-        
+
     optimizer = torch.optim.Adam(
         moe_model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     return moe_model, optimizer
 
 
+# ---------------------------------------------------------------------------
+# Resume helpers
+# ---------------------------------------------------------------------------
+
+def _try_resume(args, moe_model, optimizer, device, dataset_root, data_name, fold):
+    """
+    If --resume-training is set, load the latest checkpoint for this fold.
+    Returns (start_epoch, restored_es_state) or (0, None) if not resuming.
+    """
+    if not getattr(args, "resume_training", False):
+        return 0, None
+
+    ckpt_dir = checkpoint_dir_for(dataset_root, data_name, args.task)
+    latest_path, _, _ = checkpoint_paths_for(ckpt_dir, data_name, args.task, fold)
+
+    # Allow explicit override via --checkpoint-path
+    explicit = getattr(args, "checkpoint_path", None)
+    if explicit:
+        latest_path = explicit
+
+    if not os.path.isfile(latest_path):
+        print(f"  [Resume] No checkpoint found at {latest_path}; starting fresh.")
+        return 0, None
+
+    ckpt = load_checkpoint(latest_path, moe_model, optimizer, device,
+                           restore_rng=True)
+    start_epoch = ckpt["epoch"] + 1
+    es_state = {
+        "counter":      ckpt.get("es_counter", 0),
+        "best_score":   ckpt.get("es_best_score", None),
+        "early_stop":   False,
+        "val_loss_min": ckpt.get("best_val_loss", float("inf")),
+    }
+    print(f"  [Resume] Training resumed from epoch {start_epoch} "
+          f"(fold {ckpt.get('fold', fold)})")
+    return start_epoch, es_state
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     start_all = time.time()
-    # ── Hardware detection ────────────────────────────────────────────────────
-    if torch.cuda.is_available() and args.device != 'cpu':
-        device = torch.device('cuda')
+
+    # ── Hardware ─────────────────────────────────────────────────────────────
+    if torch.cuda.is_available() and args.device != "cpu":
+        device = torch.device("cuda")
         print("Hardware detected: GPU")
     else:
-        device = torch.device('cpu')
-        print("Hardware detected: CPU. This is great for local testing!")
+        device = torch.device("cpu")
+        print("Hardware detected: CPU")
 
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -151,287 +245,291 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    data_name    = args.data if args.data else 'davis'
-    label_col    = 'lab' if args.task == 'classification' else 'affinity'
+    data_name    = args.data if args.data else "davis"
+    label_col    = "lab" if args.task == "classification" else "affinity"
     args.label   = label_col
+    # Root path: from --root CLI flag or cwd (consistent across ALL path derivations)
     dataset_root = args.root if args.root else os.getcwd()
 
-    print(f"\nLoading dataset: {data_name}  |  task: {args.task}")
-    print(f"  Embeddings  : ESM + ChemBERT — generated dynamically per sample, RAM-cached only")
-    print(f"  Expert feats: fingerprints / MPNN / MDeePred — auto-generated on disk if missing")
-    print(f"  Saved to disk: only the single best model weights\n")
+    print(f"\nLoading dataset : {data_name}  |  task: {args.task}")
+    print(f"  Root          : {dataset_root}")
+    print(f"  Embeddings    : ESM2 + ChemBERT — offline cache (generated once, reused)")
+    print(f"  Expert feats  : fingerprints / MPNN / MDeePred — disk-cached")
+    print(f"  Checkpoints   : {os.path.join(dataset_root, 'checkpoints', data_name, args.task)}\n")
 
-    current_subset = args.subset_size if args.mode == 'debug' else None
+    current_subset = args.subset_size if args.mode == "debug" else None
 
     dataset = MoEDataset(
-        root=dataset_root, dataset_name=data_name,
-        label_type=label_col, subset_size=current_subset,
-        MAX_SMI_LEN=args.com_len, MAX_SEQ_LEN=args.pro_len, mode=args.get_dataset,
+        root          = dataset_root,
+        dataset_name  = data_name,
+        label_type    = label_col,
+        subset_size   = current_subset,
+        MAX_SMI_LEN   = args.com_len,
+        MAX_SEQ_LEN   = args.pro_len,
+        mode          = args.get_dataset,
+        rebuild_cache = args.rebuild_cache,
     )
 
     _validate_dataset_integrity(dataset)
 
-    # ── Debug mode adjustments ────────────────────────────────────────────────
+    # ── Debug mode ────────────────────────────────────────────────────────────
     num_folds = 5
-    if args.mode == 'debug':
+    if args.mode == "debug":
         print(f"\n[DEBUG MODE] Subset of {len(dataset)} items active.")
-        print(">> Restricting to 1 FOLD, 3 EPOCHS, and Batch 16 for rapid verification.")
+        print(">> 1 FOLD | 3 EPOCHS | batch=16")
         args.epoch = min(args.epoch, 3)
         args.batch = 16
-        num_folds = 1 # Run only one fold in debug mode
+        num_folds  = 1
 
-    if args.task == 'classification':
-        loss_fn = nn.BCEWithLogitsLoss()
+    if args.task == "classification":
+        loss_fn     = nn.BCEWithLogitsLoss()
         args.metrics = metrics_classification
     else:
-        loss_fn = nn.MSELoss()
+        loss_fn     = nn.MSELoss()
         args.metrics = metrics_regression
 
-    # ── Reference Data Split & Cross-Validation Logic ─────────────────────────
+    # ── Deterministic splits ──────────────────────────────────────────────────
     indices = list(range(len(dataset)))
     random.Random(args.seed).shuffle(indices)
-    
-    save_path    = os.path.join(dataset_root, 'saved_models')
-    # Include task in results_path so classification and regression outputs never overwrite each other
-    results_path = os.path.join(dataset_root, 'results', data_name, args.task)
-    os.makedirs(save_path,    exist_ok=True)
-    os.makedirs(results_path, exist_ok=True)
-    
-    print(f"--- Path Diagnostics ---")
-    print(f"Root Dir:            {dataset_root}")
-    print(f"Results Path:        {os.path.abspath(results_path)}")
-    print(f"Save Path:           {os.path.abspath(save_path)}")
-    print(f"------------------------\n")
 
-    best_results = {}
-    # Two-level best-model tracking:
-    # Level 1 — best epoch within each fold (handled by EarlyStopping in trainer)
-    # Level 2 — best fold across all folds (tracked here)
-    global_best_val_loss    = float('inf')
+    # All paths derived from dataset_root (accepts --root from CLI)
+    results_path  = os.path.join(dataset_root, "results",     data_name, args.task)
+    save_path     = os.path.join(dataset_root, "saved_models")
+    ckpt_dir      = checkpoint_dir_for(dataset_root, data_name, args.task)
+
+    for d in (results_path, save_path, ckpt_dir):
+        os.makedirs(d, exist_ok=True)
+
+    print("--- Path Diagnostics ---")
+    print(f"  Root          : {dataset_root}")
+    print(f"  Results       : {os.path.abspath(results_path)}")
+    print(f"  Saved models  : {os.path.abspath(save_path)}")
+    print(f"  Checkpoints   : {os.path.abspath(ckpt_dir)}")
+    print("------------------------\n")
+
+    best_results            = {}
+    global_best_val_loss    = float("inf")
     global_best_model_state = None
     global_best_fold        = -1
-  
 
+    # ── Fold loop ─────────────────────────────────────────────────────────────
     for fold in range(num_folds):
         print(f"\n===== FOLD {fold} =====")
 
-        # Deterministic split: sort set before sampling so order is seed-stable
+        # Deterministic 5-fold split
+        fold_size = int(0.2 * len(indices))
         if num_folds == 1:
-            fold_size      = int(0.2 * len(indices))
-            test_idx       = indices[:fold_size]
-            train_pool_idx = sorted(set(indices) - set(test_idx))
-            valid_idx      = random.Random(args.seed + fold).sample(
-                                train_pool_idx, int(0.1 * len(train_pool_idx)))
-            train_idx      = sorted(set(train_pool_idx) - set(valid_idx))
+            test_idx = indices[:fold_size]
+        elif fold == num_folds - 1:
+            test_idx = indices[fold * fold_size:]
         else:
-            fold_size = int(0.2 * len(indices))
-            if fold == 4:
-                test_idx = indices[fold * fold_size:]
-            else:
-                test_idx = indices[fold * fold_size:(fold + 1) * fold_size]
+            test_idx = indices[fold * fold_size:(fold + 1) * fold_size]
 
-            train_pool_idx = sorted(set(indices) - set(test_idx))
-            valid_idx      = random.Random(args.seed + fold).sample(
-                                train_pool_idx, int(0.1 * len(train_pool_idx)))
-            train_idx      = sorted(set(train_pool_idx) - set(valid_idx))
+        train_pool_idx = sorted(set(indices) - set(test_idx))
+        valid_idx      = random.Random(args.seed + fold).sample(
+            train_pool_idx, int(0.1 * len(train_pool_idx))
+        )
+        train_idx = sorted(set(train_pool_idx) - set(valid_idx))
 
-        # Reverting num_workers to 0. Since the dataset dynamically generates
-        # ESM/ChemBERT embeddings using CUDA inside __getitem__, we cannot safely
-        # use multiprocessing (which triggers the CUDA fork/spawn RuntimeError).
-        num_workers = 0
+        num_workers  = 0   # keep 0: dataset uses in-process cache lookups
         train_loader = torch.utils.data.DataLoader(
             torch.utils.data.Subset(dataset, train_idx),
-            batch_size=args.batch, shuffle=True, collate_fn=moe_collate_fn,
-            num_workers=num_workers, pin_memory=True
+            batch_size=args.batch, shuffle=True,
+            collate_fn=moe_collate_fn, num_workers=num_workers, pin_memory=False,
         )
         valid_loader = torch.utils.data.DataLoader(
             torch.utils.data.Subset(dataset, valid_idx),
-            batch_size=args.batch, shuffle=False, collate_fn=moe_collate_fn,
-            num_workers=num_workers, pin_memory=True
+            batch_size=args.batch, shuffle=False,
+            collate_fn=moe_collate_fn, num_workers=num_workers, pin_memory=False,
         )
         test_loader = torch.utils.data.DataLoader(
             torch.utils.data.Subset(dataset, test_idx),
-            batch_size=args.batch, shuffle=False, collate_fn=moe_collate_fn,
-            num_workers=num_workers, pin_memory=True
+            batch_size=args.batch, shuffle=False,
+            collate_fn=moe_collate_fn, num_workers=num_workers, pin_memory=False,
         )
 
         moe_model, optimizer = _build_experts_and_model(args, device, dataset)
 
-        # Train (EarlyStopping inside picks best epoch → restores weights)
-        moe_model, best_val_metrics, best_val_loss, fold_train_times, fold_val_times, epoch_history = train_moe(
-            train_loader, moe_model, loss_fn, optimizer, args,
-            valid_loader=valid_loader
+        # ── Resume ───────────────────────────────────────────────────────────
+        start_epoch, restored_es_state = _try_resume(
+            args, moe_model, optimizer, device, dataset_root, data_name, fold
         )
 
-        # ── Save per-fold epoch history for graph plotting ─────────────────────
-        fold_csv = os.path.join(results_path, f'fold_{fold}_epoch_history.csv')
-        pd.DataFrame(epoch_history).to_csv(fold_csv, index=False)
-        print(f"  Epoch history saved → {fold_csv}")
+        # ── Train ────────────────────────────────────────────────────────────
+        try:
+            moe_model, best_val_metrics, best_val_loss, fold_train_times, \
+                fold_val_times, epoch_history = train_moe(
+                    train_loader, moe_model, loss_fn, optimizer, args,
+                    valid_loader      = valid_loader,
+                    checkpoint_dir    = dataset_root,
+                    fold              = fold,
+                    dataset_name      = data_name,
+                    start_epoch       = start_epoch,
+                    restored_es_state = restored_es_state,
+                )
+        except KeyboardInterrupt:
+            print("\n[Main] Keyboard interrupt — stopping cross-validation.")
+            sys.exit(0)
 
-        # ── Level-2: update global best across folds ──────────────────────────────
+        # ── Save epoch history CSV ────────────────────────────────────────────
+        fold_csv = os.path.join(results_path, f"fold_{fold}_epoch_history.csv")
+        pd.DataFrame(epoch_history).to_csv(fold_csv, index=False)
+        print(f"  Epoch history → {fold_csv}")
+
+        # ── Global best across folds ──────────────────────────────────────────
         if best_val_loss < global_best_val_loss:
             global_best_val_loss    = best_val_loss
-            # Strip DataParallel 'module.' prefix so the saved checkpoint
-            # is portable and can be loaded on a single-GPU machine too.
-            raw_model = moe_model.module if hasattr(moe_model, 'module') else moe_model
+            raw_model               = moe_model.module if hasattr(moe_model, "module") else moe_model
             global_best_model_state = copy.deepcopy(raw_model.state_dict())
             global_best_fold        = fold
-            print(f"  ✓ New global best model  fold={fold}  val_loss={best_val_loss:.4f}")
+            print(f"  ✓ New global best — fold={fold}  val_loss={best_val_loss:.4f}")
 
-        # ── Inductive Conformal Prediction (ICP) - Reference Logic ────────────
-        print(f"\n--- ICP Calibration (Confidence Threshold={args.confidence}) ---")
+        # ── ICP Calibration ───────────────────────────────────────────────────
+        print(f"\n--- ICP Calibration (confidence={args.confidence}) ---")
         cal_scores = get_calibration_scores(moe_model, valid_loader, args.task)
         print(f"  Calibration items: {len(cal_scores)}")
 
-        # Test at the end of each fold (model already holds best-epoch weights)
+        # ── Test ──────────────────────────────────────────────────────────────
         print(f"\n--- Testing Fold {fold} ---")
-        # Passing cal_scores to test_moe triggers the reference ICP logic
-        result, perf, t_loss = test_moe(test_loader, moe_model, loss_fn, args, 
-                                        split=f'Test_Fold_{fold}', cal_scores=cal_scores)
-        
-        # --- Varying ICP Confidence Evaluation (Reference Style) ---
-        thresholds = [0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
+        result, perf, t_loss = test_moe(
+            test_loader, moe_model, loss_fn, args,
+            split=f"Test_Fold_{fold}", cal_scores=cal_scores,
+        )
+
+        # ── ICP threshold sweep ───────────────────────────────────────────────
+        thresholds       = [0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
         icp_results_summary = []
-        
-        print(f"\n{'Threshold':<10} {'Model':<10} {'Count':<8} {'Accuracy':<10} {'Selection%':<12}")
-        print("-" * 55)
 
-        if args.task == 'classification':
-            for threshold in thresholds:
-                icp_acc, sel_rate, sub_count = calculate_icp_selective_metrics(result, args, threshold)
-                print(f"{threshold:<10.2f} {'MoE':<10} {sub_count:<8} {icp_acc:<10.3f} {sel_rate*100:<12.1f}%")
+        if args.task == "classification":
+            # FIX: header labels are meaningful for classification
+            print(f"\n{'Threshold':<10} {'Model':<10} {'Count':<8} "
+                  f"{'Accuracy':<10} {'Selection%':<12}")
+            print("-" * 55)
+            for thr in thresholds:
+                icp_acc, sel_rate, sub_count = calculate_icp_selective_metrics(
+                    result, args, thr
+                )
+                print(f"{thr:<10.2f} {'MoE':<10} {sub_count:<8} "
+                      f"{icp_acc:<10.3f} {sel_rate*100:<12.1f}%")
                 icp_results_summary.append({
-                    'threshold': threshold,
-                    'accuracy': icp_acc,
-                    'selection_rate': sel_rate,
-                    'count': sub_count
+                    "threshold":      thr,
+                    "accuracy":       icp_acc,
+                    "selection_rate": sel_rate,
+                    "count":          sub_count,
                 })
-            
-            # Use the args.confidence threshold for the "official" final metrics recorded in best_results
-            icp_acc, sel_rate, sub_count = calculate_icp_selective_metrics(result, args, args.confidence)
-            icp_names = ['ICP_Sub_Accuracy', 'ICP_Selection_Rate', 'ICP_Sub_Count']
+            icp_acc, sel_rate, sub_count = calculate_icp_selective_metrics(
+                result, args, args.confidence
+            )
+            icp_names = ["ICP_Sub_Accuracy", "ICP_Selection_Rate", "ICP_Sub_Count"]
             icp_vals  = [icp_acc, sel_rate, sub_count]
+
         else:
-            # For Regression: Calculate coverage at different confidence levels
-            # In regression, confidence = 1 - alpha. 
-            # If threshold is 0.9, we want alpha = 0.1
-            for threshold in thresholds:
-                # Need to recalculate q for each alpha
-                alpha_val = 1.0 - threshold
-                q_val = np.quantile(cal_scores, threshold) # threshold is 1-alpha
-                
-                label = result[args.label]
-                low   = result['pred'] - q_val
-                high  = result['pred'] + q_val
-                
-                coverage  = ((label >= low) & (label <= high)).mean()
-                avg_width = 2 * q_val
-                
-                print(f"{threshold:<10.2f} {'MoE':<10} {len(label):<8} {coverage:<10.3f} {'100.0%':<12} (Width: {avg_width:.3f})")
+            # BUG FIX: use Coverage / Width column headers for regression
+            print(f"\n{'Threshold':<10} {'Model':<10} {'Count':<8} "
+                  f"{'Coverage':<10} {'Width':<12}")
+            print("-" * 55)
+            for thr in thresholds:
+                q_val    = float(np.quantile(cal_scores, thr))
+                lab_arr  = np.array(result[args.label])
+                pred_arr = np.array(result["pred"])
+                coverage = float(((lab_arr >= pred_arr - q_val) &
+                                  (lab_arr <= pred_arr + q_val)).mean())
+                width    = 2.0 * q_val
+                print(f"{thr:<10.2f} {'MoE':<10} {len(lab_arr):<8} "
+                      f"{coverage:<10.3f} {width:<12.3f}")
                 icp_results_summary.append({
-                    'threshold': threshold,
-                    'coverage': coverage,
-                    'avg_width': avg_width
+                    "threshold": thr,
+                    "coverage":  coverage,
+                    "avg_width": width,
                 })
+            q_final  = float(np.quantile(cal_scores, args.confidence))
+            lab_arr  = np.array(result[args.label])
+            pred_arr = np.array(result["pred"])
+            coverage = float(((lab_arr >= pred_arr - q_final) &
+                              (lab_arr <= pred_arr + q_final)).mean())
+            icp_names = ["ICP_Coverage", "ICP_Avg_Width"]
+            icp_vals  = [coverage, 2.0 * q_final]
 
-            # Use args.confidence for final metrics
-            q_final = np.quantile(cal_scores, args.confidence)
-            label = result[args.label]
-            low   = result['icp_low']
-            high  = result['icp_high']
-            
-            coverage  = ((label >= result['pred'] - q_final) & (label <= result['pred'] + q_final)).mean()
-            avg_width = 2 * q_final
-            
-            icp_names = ['ICP_Coverage', 'ICP_Avg_Width']
-            icp_vals  = [coverage, avg_width]
-
-        # --- Save ICP Summary Table to CSV ---
+        # ── Save ICP CSV ──────────────────────────────────────────────────────
         if args.save_result:
-            icp_summary_df = pd.DataFrame(icp_results_summary)
-            icp_summary_file = os.path.join(results_path, f"ICP_Threshold_Summary_Fold_{fold}.csv")
-            icp_summary_df.to_csv(icp_summary_file, index=False)
-            print(f"  ✓ ICP Threshold Summary saved to: {icp_summary_file}")
+            icp_df   = pd.DataFrame(icp_results_summary)
+            icp_file = os.path.join(results_path, f"ICP_Threshold_Summary_Fold_{fold}.csv")
+            icp_df.to_csv(icp_file, index=False)
+            print(f"  ✓ ICP summary → {icp_file}")
 
         final_metrics = perf.iloc[0].to_dict()
         for name, val in zip(icp_names, icp_vals):
             final_metrics[name] = val
-            
-        print(f"Fold {fold} Test Results (including ICP):", final_metrics)
+        print(f"Fold {fold} test results: {final_metrics}")
 
         best_results[f"fold_{fold}"] = {
             "best_val_metrics": best_val_metrics,
             "best_val_loss":    best_val_loss,
             "test_metrics":     final_metrics,
-            # FIX 2: Guard against empty time lists (e.g. early stop at epoch 0)
             "avg_train_time":   float(np.mean(fold_train_times)) if fold_train_times else 0.0,
             "avg_val_time":     float(np.mean(fold_val_times))   if fold_val_times   else 0.0,
         }
 
-    # ── Save ONE final model: best epoch of best fold ─────────────────────────
+    # ── Save global best model ────────────────────────────────────────────────
     if global_best_model_state is not None:
-        # Include task in filename so classification and regression models coexist
-        global_model_path = os.path.join(save_path, f"best_model_{data_name}_{args.task}.pt")
+        global_model_path = os.path.join(
+            save_path, f"best_model_{data_name}_{args.task}.pt"
+        )
         torch.save({
-            'state_dict':    global_best_model_state,
-            'best_fold':     global_best_fold,
-            'best_val_loss': global_best_val_loss,
-            'dataset':       data_name,
-            'task':          args.task,
-            'top_k':         args.top_k,
+            "state_dict":    global_best_model_state,
+            "best_fold":     global_best_fold,
+            "best_val_loss": global_best_val_loss,
+            "dataset":       data_name,
+            "task":          args.task,
+            "top_k":         args.top_k,
         }, global_model_path)
         print(f"\n✓ Global best model saved — fold={global_best_fold}  "
               f"val_loss={global_best_val_loss:.4f}")
         print(f"  Path: {global_model_path}")
 
-    # ── Save cross-fold summary (all test metrics) for graph plotting ──────────
+    # ── Cross-fold summary CSV ────────────────────────────────────────────────
     summary_rows = []
     for fold_key, fold_data in best_results.items():
-        row = {'fold': fold_key, 'best_val_loss': fold_data['best_val_loss']}
-        row.update({f'test_{k}': v for k, v in fold_data['test_metrics'].items()})
-        row.update({f'val_{k}':  v for k, v in (fold_data['best_val_metrics'] or {}).items()})
+        row = {"fold": fold_key, "best_val_loss": fold_data["best_val_loss"]}
+        row.update({f"test_{k}": v for k, v in fold_data["test_metrics"].items()})
+        row.update({f"val_{k}":  v for k, v in (fold_data["best_val_metrics"] or {}).items()})
         summary_rows.append(row)
     summary_df = pd.DataFrame(summary_rows)
 
-    # Compute cross-fold mean ± std for all numeric columns and append as summary rows
     numeric_cols = summary_df.select_dtypes(include=[np.number]).columns.tolist()
     if len(summary_rows) > 1 and numeric_cols:
-        mean_row = {'fold': 'mean'}
-        std_row  = {'fold': 'std'}
-        mean_row.update({c: summary_df[c].mean() for c in numeric_cols})
-        std_row.update( {c: summary_df[c].std()  for c in numeric_cols})
-        summary_df = pd.concat([summary_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
-
-    summary_csv = os.path.join(results_path, 'fold_summary.csv')
+        mean_row = {"fold": "mean", **{c: summary_df[c].mean() for c in numeric_cols}}
+        std_row  = {"fold": "std",  **{c: summary_df[c].std()  for c in numeric_cols}}
+        summary_df = pd.concat(
+            [summary_df, pd.DataFrame([mean_row, std_row])], ignore_index=True
+        )
+    summary_csv = os.path.join(results_path, "fold_summary.csv")
     summary_df.to_csv(summary_csv, index=False)
-    print(f"✓ Fold summary (with mean±std) saved → {summary_csv}")
+    print(f"✓ Fold summary → {summary_csv}")
 
-    # Log results locally
-    log_file = os.path.join(dataset_root, 'experiment_results.json')
+    # ── Append to experiment log ──────────────────────────────────────────────
+    log_file = os.path.join(dataset_root, "experiment_results.json")
     log_entry = {
-        'timestamp': time.ctime(),
-        'dataset': data_name,
-        'task': args.task,
-        'top_k': args.top_k,
-        'fold_results': best_results,
-        'total_time': time.time() - start_all
+        "timestamp":    time.ctime(),
+        "dataset":      data_name,
+        "task":         args.task,
+        "top_k":        args.top_k,
+        "fold_results": best_results,
+        "total_time":   time.time() - start_all,
     }
-    
     entries = []
     if os.path.exists(log_file):
-        with open(log_file, 'r') as f:
+        with open(log_file, "r") as f:
             try:
                 entries = json.load(f)
             except json.JSONDecodeError:
-                # FIX 10: Only swallow malformed JSON, not OS/permission errors
                 print(f"[Warning] Could not parse {log_file}; starting fresh log.")
-                entries = []
     entries.append(log_entry)
-    with open(log_file, 'w') as f:
+    with open(log_file, "w") as f:
         json.dump(entries, f, indent=4, cls=NpEncoder)
 
-    total_duration = time.time() - start_all
-    print(f"\nAll experiments done in {total_duration:.2f}s.")
+    print(f"\nAll experiments done in {time.time() - start_all:.2f}s.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

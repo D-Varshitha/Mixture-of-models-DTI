@@ -269,3 +269,53 @@ class PretrainedEmbeddingGenerator:
         }
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
+
+    # ------------------------------------------------------------------
+    # Bulk offline-cache generation
+    # ------------------------------------------------------------------
+
+    def embed_all_unique(
+        self,
+        drug_id_to_smiles: Dict[str, str],
+        prot_id_to_seq:    Dict[str, str],
+    ) -> "Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]":
+        """
+        Generate token-level embeddings for every unique drug and protein.
+
+        This is the primary entry-point called by the offline cache builder
+        (``embedding_cache.build_embedding_cache``).  Both HF models are
+        loaded lazily on the first embedding call.
+
+        Parameters
+        ----------
+        drug_id_to_smiles : {drug_id -> SMILES}
+        prot_id_to_seq    : {protein_id -> amino-acid sequence}
+
+        Returns
+        -------
+        (prot_cache, drug_cache)
+            Each is a dict  id -> Tensor[L, H]  on CPU float32.
+            Tokens are NOT pooled — the gating network handles pooling.
+        """
+        from typing import Tuple  # avoid circular at module level
+
+        drug_cache: Dict[str, torch.Tensor] = {}
+        prot_cache: Dict[str, torch.Tensor] = {}
+
+        # ── drugs ────────────────────────────────────────────────────────
+        n_drugs = len(drug_id_to_smiles)
+        for i, (did, smiles) in enumerate(drug_id_to_smiles.items()):
+            emb = self.embed_drug(smiles).to(torch.float32)  # already CPU
+            drug_cache[did] = emb
+            if (i + 1) % 50 == 0 or (i + 1) == n_drugs:
+                print(f"  [embed_all_unique] drugs  {i + 1:>5}/{n_drugs}")
+
+        # ── proteins ─────────────────────────────────────────────────────
+        n_prots = len(prot_id_to_seq)
+        for i, (pid, seq) in enumerate(prot_id_to_seq.items()):
+            emb = self.embed_protein(seq).to(torch.float32)  # already CPU
+            prot_cache[pid] = emb
+            if (i + 1) % 20 == 0 or (i + 1) == n_prots:
+                print(f"  [embed_all_unique] proteins {i + 1:>5}/{n_prots}")
+
+        return prot_cache, drug_cache

@@ -42,7 +42,7 @@ parser.add_argument('--mode', default='full', choices=['debug', 'full'], help='d
 parser.add_argument('--subset-size', default=100, type=int, help='number of samples to test in debug mode')
 parser.add_argument('--lambda-aux', default=0.1, type=float, help='weight for auxiliary load balancing loss in MoE')
 parser.add_argument('--seed', default=42, type=int, help='global random seed for reproducible full training')
-parser.add_argument('--top_k', default=2, type=int, choices=[2, 3, 4, 5, 6], help='number of top k experts to select')
+parser.add_argument('--top_k', default=2, type=int, choices=[1, 2, 3, 4, 5, 6], help='number of top k experts to select (1 = single best expert / no ensembling)')
 parser.add_argument('--esm-model-name', default='facebook/esm2_t30_150M_UR50D', type=str, help='pretrained ESM model for protein token embeddings')
 parser.add_argument('--chembert-model-name', default='seyonec/ChemBERTa-zinc-base-v1', type=str, help='pretrained ChemBERT/ChemBERTa model for SMILES token embeddings')
 parser.add_argument('--hf-cache-dir', default=None, type=str, help='optional HuggingFace cache dir')
@@ -51,6 +51,17 @@ parser.add_argument('--protein-chunk-stride', default=512, type=int, help='overl
 parser.add_argument('--drug-chunk-len', default=510, type=int, help='max SMILES token chunk length for ChemBERT (hard limit 510 = 512 - 2 specials)')
 parser.add_argument('--drug-chunk-stride', default=255, type=int, help='overlap stride for SMILES token chunk embedding')
 parser.add_argument('--confidence', default=0.95, type=float, help='confidence level (1 - alpha) for Inductive Conformal Prediction')
+parser.add_argument('--rebuild-cache', action='store_true', default=False,
+                    help='force regeneration of the offline embedding cache even if '
+                         'cache files already exist on disk (useful after changing '
+                         'ESM / ChemBERT model names or chunk parameters)')
+parser.add_argument('--resume-training', action='store_true', default=False,
+                    help='resume training from the latest checkpoint for the current '
+                         'fold (looks in <root>/checkpoints/<dataset>/<task>/)')
+parser.add_argument('--checkpoint-path', default=None, type=str,
+                    help='explicit path to a checkpoint .pt file to resume from; '
+                         'overrides the default latest_checkpoint.pt discovery logic')
+
 
 args = parser.parse_args()
 print('ARGUMENT:\n', args) 
