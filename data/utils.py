@@ -70,23 +70,11 @@ def bond_features(bond):
     fstereo = onek_encoding_unk(stereo, [0,1,2,3,4,5])
     return torch.Tensor(fbond + fstereo)
 
-def build_one_hot_enc(line, max_len, chars):
-	X = np.zeros((max_len, len(chars))) #+1
-	for i, ch in enumerate(line[:max_len]):
-		X[i, (chars[ch]-1)] = 1 
-	return X #.tolist()
-
 def build_seq_enc(line, chars, unknown_idx=0):
     """Encode a character sequence using a vocabulary dict.
     Unknown characters map to unknown_idx (default 0 = padding) instead of raising KeyError.
     """
     return [chars.get(ch, unknown_idx) for ch in line]
-
-def build_ngram(seq, N, dic):
-    seq = '-' + seq + '='
-    words = [dic[seq[i:i+N]]
-             for i in range(len(seq)-N+1)]
-    return np.array(words)
 
 def build_mol_graph(mol):
     atom_features_list = []
@@ -188,11 +176,3 @@ def extract_fingerprints(atoms, i_jbond_dict, edge_dict, fingerprint_dict):
                     both_side = tuple(sorted((nodes[i], nodes[j])))
                     edge = edge_dict[(both_side, edge)]
     return np.array(fingerprints)
-
-def mapping_bool(value, l):
-    if value not in l:
-        return [False] * (len(l)-1) + [True]
-    else:
-        bool_l = [False] * len(l)
-        bool_l[l.index(value)] = True
-        return bool_l

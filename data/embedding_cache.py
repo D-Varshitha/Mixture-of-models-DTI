@@ -128,7 +128,7 @@ def build_embedding_cache(
         _validate_single_embedding(emb, f"protein[{pid}]",
                                    expected_dim=generator.esm_hidden_size)
         prot_cache[pid] = emb
-        if (i + 1) % 20 == 0 or (i + 1) == len(prot_id_to_seq):
+        if (i + 1) % 50 == 0 or (i + 1) == len(prot_id_to_seq):
             print(f"  Proteins: {i + 1:>5}/{len(prot_id_to_seq)}")
     prot_gen_time = time.time() - t0
     print(f"  ✓ Protein embeddings done in {prot_gen_time:.1f}s")

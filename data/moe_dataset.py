@@ -47,7 +47,7 @@ from .embedding_cache import (
     _validate_single_embedding,
 )
 from .pretrained_embeddings import PretrainedEmbeddingGenerator
-from .utils import build_seq_enc, build_ngram, build_one_hot_enc
+from .utils import build_seq_enc
 
 _REQUIRED_COM_FILES = {
     'fp_2048': 'fps_2048.npy',
