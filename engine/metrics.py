@@ -49,14 +49,7 @@ def calculate_icp_metrics_classification(df, args, threshold):
     Calculates Validity (Coverage) and Efficiency (Set Size) for ICP.
     """
     prob = np.array(df['pred'])
-    label = np.array(df[args.label])
-    
-    # Non-conformity score for class 1: 1 - p
-    # Non-conformity score for class 0: p
-    
-    # Class 0 is in set if prob <= threshold
-    # Class 1 is in set if (1 - prob) <= threshold  => prob >= 1 - threshold
-    
+    label = np.array(df[args.label]) 
     in_set_0 = prob <= threshold
     in_set_1 = prob >= (1.0 - threshold)
     
