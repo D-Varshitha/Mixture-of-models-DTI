@@ -198,8 +198,11 @@ def _try_resume(args, moe_model, optimizer, device, dataset_root, data_name, fol
     if not getattr(args, "resume_training", False):
         return 0, None
 
-    ckpt_dir = checkpoint_dir_for(dataset_root, data_name, args.task)
-    latest_path, _, _ = checkpoint_paths_for(ckpt_dir, data_name, args.task, fold)
+    # checkpoint_paths_for expects (root, dataset_name, task, fold) where root is
+    # the top-level directory (e.g. /workspace). It internally appends
+    # checkpoints/<dataset>/<task>/fold_X_*.pt.
+    # Passing ckpt_dir here would double-nest the path, so we pass dataset_root.
+    latest_path, _, _ = checkpoint_paths_for(dataset_root, data_name, args.task, fold)
 
     # Allow explicit override via --checkpoint-path
     explicit = getattr(args, "checkpoint_path", None)

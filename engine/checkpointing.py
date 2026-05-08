@@ -145,6 +145,17 @@ def load_checkpoint(
     """
     Load a checkpoint from *checkpoint_path* and restore all states.
 
+    Caller contract
+    ---------------
+    The model MUST already be on *device* (and optionally wrapped with
+    CustomDataParallel) BEFORE this function is called.  We do NOT call
+    model.to(device) here because:
+      1. The inner DTI_Sparse_MoE weights are loaded into model.module
+         (or model directly), which is already on the correct device.
+      2. Calling .to(device) again after DataParallel wrapping would
+         silently trigger a redundant full-model device transfer on
+         every resume.
+
     Returns the raw checkpoint dict so the caller can recover epoch, fold,
     best_val_loss, early-stopping counters, etc.
     """
@@ -155,7 +166,10 @@ def load_checkpoint(
 
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
-    # ── model weights ────────────────────────────────────────────────────────
+    # ── model weights ─────────────────────────────────────────────────────────
+    # Unwrap DataParallel to access the raw inner model.
+    # Checkpoints are ALWAYS saved without the 'module.' prefix (see save_checkpoint)
+    # so this correctly handles both single-GPU and multi-GPU resume.
     raw_model = model.module if hasattr(model, "module") else model
     state = ckpt["model_state"]
     missing, unexpected = raw_model.load_state_dict(state, strict=True)
@@ -163,7 +177,7 @@ def load_checkpoint(
         raise RuntimeError(f"[Checkpoint] Missing keys in checkpoint: {missing}")
     if unexpected:
         raise RuntimeError(f"[Checkpoint] Unexpected keys in checkpoint: {unexpected}")
-    model.to(device)
+    # NOTE: No model.to(device) here — model is already on device (see caller contract above).
 
     # ── optimizer ────────────────────────────────────────────────────────────
     optimizer.load_state_dict(ckpt["optimizer_state"])
