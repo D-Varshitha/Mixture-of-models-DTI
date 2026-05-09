@@ -303,6 +303,7 @@ def main():
     )
 
     _validate_dataset_integrity(dataset)
+    print(f"\n[Dataset] Total loaded samples: {len(dataset)}")
 
     # ── Debug mode ────────────────────────────────────────────────────────────
     num_folds = 5
@@ -386,6 +387,8 @@ def main():
             train_pool_idx, int(0.1 * len(train_pool_idx))
         )
         train_idx = sorted(set(train_pool_idx) - set(valid_idx))
+
+        print(f"  Split sizes -> Train: {len(train_idx)} | Valid: {len(valid_idx)} | Test: {len(test_idx)}")
 
         num_workers  = 0   # keep 0: dataset uses in-process cache lookups
         train_loader = torch.utils.data.DataLoader(
@@ -529,6 +532,8 @@ def main():
             "test_metrics":     final_metrics,
             "avg_train_time":   float(np.mean(fold_train_times)) if fold_train_times else 0.0,
             "avg_val_time":     float(np.mean(fold_val_times))   if fold_val_times   else 0.0,
+            "valid_samples":    len(valid_idx),
+            "test_samples":     len(test_idx),
         }
         best_results[f"fold_{fold}"] = fold_data
 
@@ -556,6 +561,9 @@ def main():
     summary_rows = []
     for fold_key, fold_data in best_results.items():
         row = {"fold": fold_key, "best_val_loss": fold_data["best_val_loss"]}
+        if "valid_samples" in fold_data:
+            row["valid_samples"] = fold_data["valid_samples"]
+            row["test_samples"]  = fold_data["test_samples"]
         row.update({f"test_{k}": v for k, v in fold_data["test_metrics"].items()})
         row.update({f"val_{k}":  v for k, v in (fold_data["best_val_metrics"] or {}).items()})
         summary_rows.append(row)
