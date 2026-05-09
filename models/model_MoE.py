@@ -465,7 +465,7 @@ class DTI_Sparse_MoE(nn.Module):
         routing_assignments = F.one_hot(top_k_indices, num_classes=self.num_experts).float()
         routing_fractions = routing_assignments.sum(dim=(0, 1)) / (B * self.k)
         aux_loss = self.num_experts * torch.sum(routing_fractions * mean_gate_probs)
-        return final_output, aux_loss * self.lambda_aux
+        return final_output, (aux_loss * self.lambda_aux).unsqueeze(0)
 
     def _pad_pcpi_batch(self, graphs, device):
         """Helper to pad a batch of pcpi_graph (atoms, bonds, adj)."""

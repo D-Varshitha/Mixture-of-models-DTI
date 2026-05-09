@@ -452,7 +452,7 @@ def main():
             print(f"  ✓ New global best — fold={fold}  val_loss={best_val_loss:.4f}")
 
         # ── ICP Calibration ───────────────────────────────────────────────────
-        print(f"\n--- ICP Calibration (confidence={args.confidence}) ---")
+        print(f"\n--- ICP Calibration--")
         cal_scores = get_calibration_scores(moe_model, valid_loader, args.task)
         print(f"  Calibration items: {len(cal_scores)}")
 
@@ -466,9 +466,10 @@ def main():
         # ── ICP threshold sweep ───────────────────────────────────────────────
         thresholds       = [0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
         icp_results_summary = []
+        icp_names = []
+        icp_vals  = []
 
         if args.task == "classification":
-            # FIX: header labels are meaningful for classification
             print(f"\n{'Threshold':<10} {'Model':<10} {'Count':<8} "
                   f"{'Accuracy':<10} {'Selection%':<12}")
             print("-" * 55)
@@ -484,14 +485,11 @@ def main():
                     "selection_rate": sel_rate,
                     "count":          sub_count,
                 })
-            icp_acc, sel_rate, sub_count = calculate_icp_selective_metrics(
-                result, args, args.confidence
-            )
-            icp_names = ["ICP_Sub_Accuracy", "ICP_Selection_Rate", "ICP_Sub_Count"]
-            icp_vals  = [icp_acc, sel_rate, sub_count]
+                # Add to final metrics dict for this specific threshold
+                icp_names.extend([f"ICP_Acc_{thr}", f"ICP_Sel_{thr}", f"ICP_Count_{thr}"])
+                icp_vals.extend([icp_acc, sel_rate, sub_count])
 
         else:
-            # BUG FIX: use Coverage / Width column headers for regression
             print(f"\n{'Threshold':<10} {'Model':<10} {'Count':<8} "
                   f"{'Coverage':<10} {'Width':<12}")
             print("-" * 55)
@@ -509,13 +507,9 @@ def main():
                     "coverage":  coverage,
                     "avg_width": width,
                 })
-            q_final  = float(np.quantile(cal_scores, args.confidence))
-            lab_arr  = np.array(result[args.label])
-            pred_arr = np.array(result["pred"])
-            coverage = float(((lab_arr >= pred_arr - q_final) &
-                              (lab_arr <= pred_arr + q_final)).mean())
-            icp_names = ["ICP_Coverage", "ICP_Avg_Width"]
-            icp_vals  = [coverage, 2.0 * q_final]
+                # Add to final metrics dict for this specific threshold
+                icp_names.extend([f"ICP_Cov_{thr}", f"ICP_Width_{thr}"])
+                icp_vals.extend([coverage, width])
 
         # ── Save ICP CSV ──────────────────────────────────────────────────────
         if args.save_result:

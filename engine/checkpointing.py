@@ -182,7 +182,6 @@ def load_checkpoint(
 
     # ── optimizer ────────────────────────────────────────────────────────────
     optimizer.load_state_dict(ckpt["optimizer_state"])
-    print("  [Checkpoint] Loaded optimizer state")
     # Move optimizer tensors to the correct device
     for state_val in optimizer.state.values():
         for k, v in state_val.items():
@@ -192,7 +191,6 @@ def load_checkpoint(
     # ── scheduler ────────────────────────────────────────────────────────────
     if scheduler is not None and ckpt.get("scheduler_state") is not None:
         scheduler.load_state_dict(ckpt["scheduler_state"])
-        print("  [Checkpoint] Loaded scheduler state")
 
     # ── RNG ──────────────────────────────────────────────────────────────────
     if restore_rng and ckpt.get("rng_state"):
