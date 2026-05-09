@@ -108,6 +108,7 @@ def train_moe(
     dataset_name:     str = "",
     start_epoch:      int = 0,
     restored_es_state: Optional[Dict] = None,
+    prior_best_val_metrics: Optional[Dict] = None,
     scheduler         = None,
 ) -> Tuple[
     torch.nn.Module,           # model (best weights restored)
@@ -139,7 +140,7 @@ def train_moe(
               f"counter={early_stopping.counter}, "
               f"best_val_loss={early_stopping.val_loss_min:.4f}")
 
-    best_val_metrics: Optional[Dict] = None
+    best_val_metrics: Optional[Dict] = prior_best_val_metrics  # restored from checkpoint on resume
     best_val_loss = early_stopping.val_loss_min  # preserves best seen so far
 
     train_times:   List[float] = []
@@ -277,7 +278,7 @@ def train_moe(
                     checkpoint_path  = latest_path,
                     model            = model,
                     optimizer        = optimizer,
-                    epoch            = epoch,
+                    epoch            = epoch - 1,  # save the last COMPLETED epoch
                     fold             = fold,
                     best_val_loss    = best_val_loss,
                     best_val_metrics = best_val_metrics,
@@ -299,7 +300,7 @@ def train_moe(
                     checkpoint_path  = latest_path,
                     model            = model,
                     optimizer        = optimizer,
-                    epoch            = epoch,
+                    epoch            = epoch - 1,  # save the last COMPLETED epoch
                     fold             = fold,
                     best_val_loss    = best_val_loss,
                     best_val_metrics = best_val_metrics,
@@ -315,7 +316,14 @@ def train_moe(
     print(f"\n  Total training time: {total_train_time:.2f}s")
 
     # Restore best weights found during this fold
-    if early_stopping.best_model_state is not None:
+    # Always prioritize loading from disk because on a resumed run, 
+    # early_stopping.best_model_state will be None if validation never improves.
+    if best_ckpt_path is not None and os.path.isfile(best_ckpt_path):
+        print(f"  [Trainer] Restoring best model weights from disk for testing...")
+        ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+        raw_model = model.module if hasattr(model, "module") else model
+        raw_model.load_state_dict(ckpt["model_state"], strict=True)
+    elif early_stopping.best_model_state is not None:
         raw_model = model.module if hasattr(model, "module") else model
         raw_model.load_state_dict(early_stopping.best_model_state)
 

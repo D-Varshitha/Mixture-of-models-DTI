@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import signal
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -181,6 +182,7 @@ def load_checkpoint(
 
     # ── optimizer ────────────────────────────────────────────────────────────
     optimizer.load_state_dict(ckpt["optimizer_state"])
+    print("  [Checkpoint] Loaded optimizer state")
     # Move optimizer tensors to the correct device
     for state_val in optimizer.state.values():
         for k, v in state_val.items():
@@ -190,6 +192,7 @@ def load_checkpoint(
     # ── scheduler ────────────────────────────────────────────────────────────
     if scheduler is not None and ckpt.get("scheduler_state") is not None:
         scheduler.load_state_dict(ckpt["scheduler_state"])
+        print("  [Checkpoint] Loaded scheduler state")
 
     # ── RNG ──────────────────────────────────────────────────────────────────
     if restore_rng and ckpt.get("rng_state"):
@@ -260,9 +263,23 @@ def emergency_save(
 ) -> None:
     """
     Best-effort checkpoint save intended for interrupt / error handlers.
-    Swallows secondary exceptions so the original traceback is preserved.
+
+    Temporarily blocks SIGINT (Ctrl+C) for the duration of the write so that
+    a second keyboard interrupt cannot corrupt the checkpoint file mid-save.
+    Catches BaseException (not just Exception) as a defense-in-depth so that
+    any unexpected signal that slips through is still reported rather than
+    silently escaping and leaving a broken .tmp file on disk.
     """
     print("\n[Checkpoint] Training interrupted — saving emergency checkpoint …")
+
+    # ── Block Ctrl+C for the duration of the save ────────────────────────────
+    # On Windows, signal.SIGINT may not be available in all contexts; guard it.
+    _old_handler = None
+    try:
+        _old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (OSError, ValueError):
+        pass  # Not on main thread or SIGINT unavailable — proceed without guard
+
     try:
         save_checkpoint(
             checkpoint_path  = checkpoint_path,
@@ -278,5 +295,12 @@ def emergency_save(
             **kwargs,
         )
         print(f"[Checkpoint] Emergency checkpoint saved → {checkpoint_path}")
-    except Exception as exc:
+    except BaseException as exc:  # catches KeyboardInterrupt + all others
         print(f"[Checkpoint] WARNING: Emergency save failed: {exc}")
+    finally:
+        # ── Always restore the original SIGINT handler ───────────────────────
+        if _old_handler is not None:
+            try:
+                signal.signal(signal.SIGINT, _old_handler)
+            except (OSError, ValueError):
+                pass

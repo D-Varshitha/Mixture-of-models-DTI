@@ -221,15 +221,12 @@ def _load_fold_results(results_path: str, fold: int) -> dict | None:
 def _try_resume(args, moe_model, optimizer, device, dataset_root, data_name, fold):
     """
     If --resume-training is set, load the latest checkpoint for this fold.
-    Returns (start_epoch, restored_es_state) or (0, None) if not resuming.
+    Returns (start_epoch, restored_es_state, prior_best_val_metrics)
+    or (0, None, None) if not resuming.
     """
     if not getattr(args, "resume_training", False):
-        return 0, None
+        return 0, None, None
 
-    # checkpoint_paths_for expects (root, dataset_name, task, fold) where root is
-    # the top-level directory (e.g. /workspace). It internally appends
-    # checkpoints/<dataset>/<task>/fold_X_*.pt.
-    # Passing ckpt_dir here would double-nest the path, so we pass dataset_root.
     latest_path, _, _ = checkpoint_paths_for(dataset_root, data_name, args.task, fold)
 
     # Allow explicit override via --checkpoint-path
@@ -239,7 +236,7 @@ def _try_resume(args, moe_model, optimizer, device, dataset_root, data_name, fol
 
     if not os.path.isfile(latest_path):
         print(f"  [Resume] No checkpoint found at {latest_path}; starting fresh.")
-        return 0, None
+        return 0, None, None
 
     ckpt = load_checkpoint(latest_path, moe_model, optimizer, device,
                            restore_rng=True)
@@ -250,9 +247,13 @@ def _try_resume(args, moe_model, optimizer, device, dataset_root, data_name, fol
         "early_stop":   False,
         "val_loss_min": ckpt.get("best_val_loss", float("inf")),
     }
-    print(f"  [Resume] Training resumed from epoch {start_epoch} "
-          f"(fold {ckpt.get('fold', fold)})")
-    return start_epoch, es_state
+    prior_best_val_metrics = ckpt.get("best_val_metrics", None)
+    best_loss = es_state["val_loss_min"]
+    print(f"  [Checkpoint] Loaded checkpoint successfully")
+    print(f"  [Resume] Resuming from epoch {start_epoch} (fold {ckpt.get('fold', fold)})")
+    if best_loss != float("inf"):
+        print(f"  [Resume] Best validation loss restored: {best_loss:.4f}")
+    return start_epoch, es_state, prior_best_val_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -406,29 +407,40 @@ def main():
         moe_model, optimizer = _build_experts_and_model(args, device, dataset)
 
         # ── Resume ───────────────────────────────────────────────────────────
-        start_epoch, restored_es_state = _try_resume(
+        start_epoch, restored_es_state, prior_best_val_metrics = _try_resume(
             args, moe_model, optimizer, device, dataset_root, data_name, fold
         )
+
+        # ── Load prior epoch history (preserve pre-interrupt rows on resume) ──
+        fold_csv      = os.path.join(results_path, f"fold_{fold}_epoch_history.csv")
+        prior_history = []
+        if start_epoch > 0 and os.path.isfile(fold_csv):
+            try:
+                prior_history = pd.read_csv(fold_csv).to_dict("records")
+                print(f"  [Resume] Loaded {len(prior_history)} prior epoch(s) from history CSV.")
+            except Exception as exc:
+                print(f"  [Warning] Could not load prior epoch history: {exc}")
 
         # ── Train ────────────────────────────────────────────────────────────
         try:
             moe_model, best_val_metrics, best_val_loss, fold_train_times, \
                 fold_val_times, epoch_history = train_moe(
                     train_loader, moe_model, loss_fn, optimizer, args,
-                    valid_loader      = valid_loader,
-                    checkpoint_dir    = dataset_root,
-                    fold              = fold,
-                    dataset_name      = data_name,
-                    start_epoch       = start_epoch,
-                    restored_es_state = restored_es_state,
+                    valid_loader            = valid_loader,
+                    checkpoint_dir          = dataset_root,
+                    fold                    = fold,
+                    dataset_name            = data_name,
+                    start_epoch             = start_epoch,
+                    restored_es_state       = restored_es_state,
+                    prior_best_val_metrics  = prior_best_val_metrics,
                 )
         except KeyboardInterrupt:
             print("\n[Main] Keyboard interrupt — stopping cross-validation.")
             sys.exit(0)
 
-        # ── Save epoch history CSV ────────────────────────────────────────────
-        fold_csv = os.path.join(results_path, f"fold_{fold}_epoch_history.csv")
-        pd.DataFrame(epoch_history).to_csv(fold_csv, index=False)
+        # ── Save epoch history CSV (append prior rows on resume) ──────────────
+        combined_history = prior_history + epoch_history
+        pd.DataFrame(combined_history).to_csv(fold_csv, index=False)
         print(f"  Epoch history → {fold_csv}")
 
         # ── Global best across folds ──────────────────────────────────────────
