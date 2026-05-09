@@ -190,6 +190,34 @@ def _build_experts_and_model(args, device, dataset):
 # Resume helpers
 # ---------------------------------------------------------------------------
 
+def _fold_results_path(results_path: str, fold: int) -> str:
+    """Path to the per-fold results JSON written after a fold fully completes."""
+    return os.path.join(results_path, f"fold_{fold}_results.json")
+
+
+def _save_fold_results(results_path: str, fold: int, fold_data: dict) -> None:
+    """Persist fold results to disk so a resumed run can skip completed folds."""
+    path = _fold_results_path(results_path, fold)
+    try:
+        with open(path, "w") as f:
+            json.dump(fold_data, f, indent=2, cls=NpEncoder)
+    except Exception as exc:
+        print(f"  [Warning] Could not save fold {fold} results: {exc}")
+
+
+def _load_fold_results(results_path: str, fold: int) -> dict | None:
+    """Return saved fold results dict if the fold has already completed, else None."""
+    path = _fold_results_path(results_path, fold)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception as exc:
+        print(f"  [Warning] Could not load fold {fold} results from {path}: {exc}")
+        return None
+
+
 def _try_resume(args, moe_model, optimizer, device, dataset_root, data_name, fold):
     """
     If --resume-training is set, load the latest checkpoint for this fold.
@@ -318,6 +346,30 @@ def main():
     # ── Fold loop ─────────────────────────────────────────────────────────────
     for fold in range(num_folds):
         print(f"\n===== FOLD {fold} =====")
+
+        # ── Resume: skip folds that already fully completed ───────────────────
+        if getattr(args, "resume_training", False):
+            saved = _load_fold_results(results_path, fold)
+            if saved is not None:
+                print(f"  [Resume] Fold {fold} already completed — restoring results from disk.")
+                best_results[f"fold_{fold}"] = saved
+                # Update global best from the restored results
+                if saved["best_val_loss"] < global_best_val_loss:
+                    global_best_val_loss = saved["best_val_loss"]
+                    global_best_fold     = fold
+                    # Global best model state: load from the saved best checkpoint
+                    _, best_ckpt_path, _ = checkpoint_paths_for(
+                        dataset_root, data_name, args.task, fold
+                    )
+                    if os.path.isfile(best_ckpt_path):
+                        tmp_model, tmp_opt = _build_experts_and_model(args, device, dataset)
+                        tmp_ckpt = load_checkpoint(best_ckpt_path, tmp_model, tmp_opt, device)
+                        raw_model = tmp_model.module if hasattr(tmp_model, "module") else tmp_model
+                        global_best_model_state = copy.deepcopy(raw_model.state_dict())
+                        print(f"  ✓ Global best restored — fold={fold}  "
+                              f"val_loss={global_best_val_loss:.4f}")
+                    del tmp_model, tmp_opt
+                continue  # skip to next fold
 
         # Deterministic 5-fold split
         fold_size = int(0.2 * len(indices))
@@ -465,13 +517,17 @@ def main():
             final_metrics[name] = val
         print(f"Fold {fold} test results: {final_metrics}")
 
-        best_results[f"fold_{fold}"] = {
+        fold_data = {
             "best_val_metrics": best_val_metrics,
             "best_val_loss":    best_val_loss,
             "test_metrics":     final_metrics,
             "avg_train_time":   float(np.mean(fold_train_times)) if fold_train_times else 0.0,
             "avg_val_time":     float(np.mean(fold_val_times))   if fold_val_times   else 0.0,
         }
+        best_results[f"fold_{fold}"] = fold_data
+
+        # ── Persist fold results so a future resume can skip this fold ────────
+        _save_fold_results(results_path, fold, fold_data)
 
     # ── Save global best model ────────────────────────────────────────────────
     if global_best_model_state is not None:
