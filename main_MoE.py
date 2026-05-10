@@ -80,7 +80,6 @@ from engine.checkpointing import (
     checkpoint_dir_for,
     checkpoint_paths_for,
     load_checkpoint,
-    emergency_save,
 )
 from engine.conformal import apply_icp_reference_logic, get_calibration_scores
 from engine.metrics import calculate_icp_selective_metrics
