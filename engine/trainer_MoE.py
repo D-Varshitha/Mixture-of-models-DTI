@@ -26,7 +26,6 @@ import pandas as pd
 import torch
 
 from engine.checkpointing import (
-    emergency_save,
     save_checkpoint,
     save_training_state_json,
     checkpoint_paths_for,
@@ -271,45 +270,15 @@ def train_moe(
                 break
 
         except KeyboardInterrupt:
-            print(f"\n[Trainer] KeyboardInterrupt received at epoch {epoch}.")
+            print(f"\n[Trainer] KeyboardInterrupt received at epoch {epoch}. Exiting without saving mid-epoch state to preserve epoch boundaries.")
             interrupted = True
-            if latest_path is not None:
-                emergency_save(
-                    checkpoint_path  = latest_path,
-                    model            = model,
-                    optimizer        = optimizer,
-                    epoch            = epoch - 1,  # save the last COMPLETED epoch
-                    fold             = fold,
-                    best_val_loss    = best_val_loss,
-                    best_val_metrics = best_val_metrics,
-                    es_counter       = early_stopping.counter,
-                    es_best_score    = early_stopping.best_score,
-                    scheduler        = scheduler,
-                    dataset          = dataset_name,
-                    task             = args.task,
-                    top_k            = args.top_k,
-                )
             raise  # re-raise so outer loop can catch / exit cleanly
 
         except RuntimeError as exc:
             oom = "out of memory" in str(exc).lower()
             tag  = "CUDA OOM" if oom else "RuntimeError"
             print(f"\n[Trainer] {tag} at epoch {epoch}: {exc}")
-            if latest_path is not None:
-                emergency_save(
-                    checkpoint_path  = latest_path,
-                    model            = model,
-                    optimizer        = optimizer,
-                    epoch            = epoch - 1,  # save the last COMPLETED epoch
-                    fold             = fold,
-                    best_val_loss    = best_val_loss,
-                    best_val_metrics = best_val_metrics,
-                    es_counter       = early_stopping.counter,
-                    es_best_score    = early_stopping.best_score,
-                    dataset          = dataset_name,
-                    task             = args.task,
-                    top_k            = args.top_k,
-                )
+            print(f"Exiting without saving mid-epoch state to preserve epoch boundaries.")
             raise
 
     total_train_time = time.time() - total_train_start
